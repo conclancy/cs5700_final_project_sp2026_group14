@@ -5,7 +5,7 @@ Build a header to pack binary data into the exact byte layout required by
 UDP protocols for header files
 
 This module provides functions to:
-  1. Build a raw UDP header with fields (source port, dest port, length, checksum)
+  1. Build a UDP header with fields (source port, dest port, length, checksum)
   2. Combine header with a datagram into a full sendable packet
   3. Compute the checksum for error detection
 """
@@ -20,14 +20,14 @@ def build_udp_header(src_port: int, dst_port: int, datagram: bytes,
     """
     Construct an 8-byte UDP header with checksum
 
-    The UDP checksum is computed over a by concatenatingthe UDP header and payload.
+    The UDP checksum is computed over a by concatenating the UDP header and payload.
    
     Args:
         src_port:   Source port number
         dst_port:   Destination port number
         datagram:   The datagram (as bytes) to be sent in the UDP packet
-        src_ip:     Source IP (dotted-decimal) — needed for checksum pseudo-header
-        dst_ip:     Destination IP (dotted-decimal) — needed for checksum pseudo-header
+        src_ip:     Source IP 
+        dst_ip:     Destination IP
 
     Returns:
         struct: An 8-byte bytes object representing the UDP header
