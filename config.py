@@ -5,6 +5,10 @@ This module centralizes parameters and constants used across the SRFT project.
 To change a global setting, edit it here once and it will propagate everywhere 
 automatically.
 """
+# ---------------------------------------------------------------------------
+# Feild Length Constants
+# ---------------------------------------------------------------------------
+UDP_HEADER_SIZE = 8  # Total header size in bytes (source port + dest port + length + checksum)
 
 # ---------------------------------------------------------------------------
 # Packet Flags
