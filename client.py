@@ -3,7 +3,7 @@ from datagram import Datagram
 class Client:
 
     def __init__(self):
-        pass
+        self.memo = {}
 
     # read the file
     def read_file(self, file: str):
@@ -13,6 +13,11 @@ class Client:
         
         with open(file, 'r') as in_file:
             data = in_file.read()
+
+        # have a memo of filename and the file_size for server writing output file
+        self.memo['filename'] = file
+        self.memo['file_size'] = len(data.encode())
+        print(self.memo)
         
         return data
     
@@ -27,12 +32,14 @@ class Client:
         if chunk_size is None or chunk_size <= 0:
             print("invalid chunk_size input")
             return None
-
-        # spliting data into fragments
+        
         start = 0
         split_data = []
 
-        while True:
+        # the first datagram info should be the file name and the file size
+        split_data.append(f"{self.memo['filename']},{self.memo['file_size']}")
+
+        while True: # spliting data into fragments
             end = start + chunk_size
             if end < len(data):
                 substring = data[start:end]
