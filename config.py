@@ -9,6 +9,8 @@ automatically.
 # Feild Length Constants
 # ---------------------------------------------------------------------------
 UDP_HEADER_SIZE = 8  # Total header size in bytes (source port + dest port + length + checksum)
+MAX_UDP_LENGTH = 0xFFFF  # Maximum UDP segment size (header + payload)
+UDP_PROTOCOL_NUMBER = 17  # IP protocol number for UDP
 
 # ---------------------------------------------------------------------------
 # Packet Flags
