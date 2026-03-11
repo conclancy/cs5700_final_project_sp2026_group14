@@ -35,7 +35,7 @@ def build_udp_header(src_port: int, dst_port: int, datagram: bytes,
 
     # Set initial values for length and checksum
     udp_length = UDP_HEADER_SIZE + len(datagram)   # total UDP segment length
-    checksum = 0                              # placeholder
+    checksum = 0                                   # placeholder
 
     # Build header with placeholder checksum to get length for checksum calculation
     header = struct.pack("!HHHH", src_port, dst_port, udp_length, checksum)
