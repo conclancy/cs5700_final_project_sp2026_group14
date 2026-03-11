@@ -1,0 +1,1 @@
+The goal of this programming project is to familiarize you with the low-level operations of the Internet protocol stack as well as reliable data transfer. So far, you have written simple client-server applications in which the server and client implemented some basic functionalities.
