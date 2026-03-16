@@ -42,3 +42,13 @@ SRFT_HEADER_SIZE = struct.calcsize(SRFT_HEADER_FORMAT)
 # File path where the server writes its transfer report.  This location can be
 # overridden by setting a different value before initializing the server.
 REPORT_PATH = "transfer_report.txt"
+
+
+# Pre-shared key used by both client and server
+# Must be >= 32 bytes for strong security
+PSK = b"SRFT_demo_pre_shared_key_32_bytes_long!!"
+
+# protocol parameters
+CLIENT_NONCE_SIZE = 16
+SERVER_NONCE_SIZE = 16
+SESSION_ID_SIZE = 8
