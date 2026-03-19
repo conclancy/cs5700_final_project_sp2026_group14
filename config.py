@@ -35,3 +35,10 @@ SRFT_HEADER_FORMAT = "!BIIHI"
 # precompute sizes so callers don't need to call struct.calcsize each time
 IP_HEADER_SIZE = struct.calcsize(IP_HEADER_FORMAT)
 SRFT_HEADER_SIZE = struct.calcsize(SRFT_HEADER_FORMAT)
+
+# ---------------------------------------------------------------------------
+# Miscellaneous defaults
+# ---------------------------------------------------------------------------
+# File path where the server writes its transfer report.  This location can be
+# overridden by setting a different value before initializing the server.
+REPORT_PATH = "transfer_report.txt"
