@@ -1,0 +1,6 @@
+- Name of the transferred file: sample.txt
+- Size of the transferred file: 285
+- The number of packets sent from the server:
+- The number of retransmitted packets from the server:
+- The number of packets received from the client:
+- The time duration of the file transfer (hh:min:ss):

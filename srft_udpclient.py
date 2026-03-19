@@ -11,5 +11,4 @@ datagrams = client.make_datagrams(split_data)
 
 for i in range(0, len(datagrams)):
     print(datagrams[i])
-    print(split_data[i])
     print("------------------------------------------------")
