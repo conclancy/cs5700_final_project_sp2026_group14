@@ -5,14 +5,11 @@ This module centralizes parameters and constants used across the SRFT project.
 To change a global setting, edit it here once and it will propagate everywhere 
 automatically.
 """
-
-import struct
 # ---------------------------------------------------------------------------
 # Feild Length Constants
 # ---------------------------------------------------------------------------
 UDP_HEADER_SIZE = 8  # Total header size in bytes (source port + dest port + length + checksum)
-MAX_UDP_LENGTH = 0xFFFF  # Maximum UDP segment size (header + payload)
-UDP_PROTOCOL_NUMBER = 17  # IP protocol number for UDP
+SRFT_HEADER_SIZE = 32
 
 # ---------------------------------------------------------------------------
 # Packet Flags
