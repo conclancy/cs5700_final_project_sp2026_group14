@@ -5,6 +5,9 @@ This module centralizes parameters and constants used across the SRFT project.
 To change a global setting, edit it here once and it will propagate everywhere 
 automatically.
 """
+
+import struct
+
 # ---------------------------------------------------------------------------
 # Feild Length Constants
 # ---------------------------------------------------------------------------
