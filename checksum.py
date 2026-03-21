@@ -15,7 +15,7 @@ def compute_checksum(data: bytes) -> int:
     Compute the Internet Checksum (RFC 1071 style).
 
     This function calculates the 16-bit one's complement checksum.
-    It is used for detecting bit corruption in transmitted packets.
+    It is used for detecting a bit corruption in transmitted packets.
 
     Steps:
     1. If total length is odd, pad one zero byte.
@@ -50,7 +50,7 @@ def compute_checksum(data: bytes) -> int:
 
     return checksum
 
-def verify_checksum(segment: bytes, checksum: bytes) -> bool:
+def verify_checksum(segment: bytes) -> bool:
     """
     Verify checksum of received UDP segment.
 
@@ -61,7 +61,6 @@ def verify_checksum(segment: bytes, checksum: bytes) -> bool:
     If the computed checksum over entire segment equals 0,
     then the packet is valid.
 
-    # TODO: I don't understand why that makes it valid?
     #  compute_checksum() should resolve in a hex value
 
     Args:
@@ -71,10 +70,10 @@ def verify_checksum(segment: bytes, checksum: bytes) -> bool:
         True if valid, False if corrupted
     """
 
-    #result = compute_checksum(segment)
+    result = compute_checksum(segment)
 
-    #return result == 0
-    return compute_checksum(segment) == checksum
+    return result == 0
+
 
 
 
