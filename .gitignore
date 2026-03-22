@@ -207,3 +207,8 @@ marimo/_lsp/
 __marimo__/
 requirements/
 .DS_Store
+
+# Generated transfer output files
+transfer_report.txt
+client_transfer_report.txt
+received_*

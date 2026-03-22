@@ -34,110 +34,12 @@ from config import (
     FLAG_SYN,
     IP_HEADER_FORMAT,
     IP_HEADER_SIZE,
-    SRFT_HEADER_FORMAT,
-    SRFT_HEADER_SIZE,
     SRFT_PORT,
     UDP_HEADER_SIZE,
 )
-from header import UDPHeader, verify_checksum
+from header import UDPHeader
+from srft_packet import build_srft_packet, ip_checksum, is_corrupt, parse_srft_packet
 
-
-# ---------------------------------------------------------------------------
-# SRFT Packet Utilities (mirrors the server-side helpers)
-# ---------------------------------------------------------------------------
-
-def compute_payload_checksum(data: bytes) -> int:
-    """32-bit modular sum checksum used in the SRFT layer."""
-    checksum = 0
-    for byte in data:
-        checksum = (checksum + byte) & 0xFFFFFFFF
-    return checksum
-
-
-def build_srft_packet(flags: int, seq_num: int, ack_num: int, payload: bytes) -> bytes:
-    """Build a complete SRFT header + payload byte string."""
-    payload = bytes(payload)
-    hdr_no_chk = struct.pack(SRFT_HEADER_FORMAT, flags, seq_num, ack_num, len(payload), 0)
-    checksum = compute_payload_checksum(hdr_no_chk[:-4] + payload)
-    return struct.pack(SRFT_HEADER_FORMAT, flags, seq_num, ack_num, len(payload), checksum) + payload
-
-
-def parse_srft_packet(data: bytes) -> dict:
-    """Parse an SRFT header and return a dict of fields."""
-    if len(data) < SRFT_HEADER_SIZE:
-        raise ValueError("data too short for SRFT header")
-    flags, seq_num, ack_num, payload_len, checksum = struct.unpack(
-        SRFT_HEADER_FORMAT, data[:SRFT_HEADER_SIZE]
-    )
-    payload = data[SRFT_HEADER_SIZE: SRFT_HEADER_SIZE + payload_len]
-    if len(payload) != payload_len:
-        raise ValueError("payload length mismatch")
-    return {
-        "flags": flags,
-        "seq_num": seq_num,
-        "ack_num": ack_num,
-        "payload_len": payload_len,
-        "checksum": checksum,
-        "payload": payload,
-    }
-
-
-def is_corrupt(pkt: dict) -> bool:
-    """Return True if the SRFT checksum does not match the recomputed value."""
-    hdr_no_chk = struct.pack(
-        SRFT_HEADER_FORMAT,
-        int(pkt["flags"]),
-        int(pkt["seq_num"]),
-        int(pkt["ack_num"]),
-        int(pkt["payload_len"]),
-        0,
-    )
-    expected = compute_payload_checksum(hdr_no_chk[:-4] + pkt["payload"])
-    return expected != int(pkt["checksum"])
-
-
-def ip_checksum(data: bytes) -> int:
-    """One's complement 16-bit IPv4 header checksum."""
-    if len(data) % 2:
-        data += b"\x00"
-    total = 0
-    for i in range(0, len(data), 2):
-        total += (data[i] << 8) + data[i + 1]
-        total = (total & 0xFFFF) + (total >> 16)
-    return (~total) & 0xFFFF
-
-
-def parse_ipv4_packet(raw: bytes) -> dict:
-    """
-    Parse an IPv4 + UDP packet from raw bytes.
-
-    Returns a dict with src_ip, dst_ip, udp_header, udp_segment, and payload.
-    Raises ValueError for malformed packets.
-    """
-    if len(raw) < IP_HEADER_SIZE + UDP_HEADER_SIZE:
-        raise ValueError("packet too short")
-    version_ihl = raw[0]
-    version = version_ihl >> 4
-    ihl = (version_ihl & 0x0F) * 4
-    if version != 4:
-        raise ValueError("not IPv4")
-    if len(raw) < ihl + UDP_HEADER_SIZE:
-        raise ValueError("packet shorter than IP header declares")
-    src_ip = socket.inet_ntoa(raw[12:16])
-    dst_ip = socket.inet_ntoa(raw[16:20])
-    udp_hdr_bytes = raw[ihl: ihl + UDP_HEADER_SIZE]
-    udp_header = UDPHeader.from_bytes(udp_hdr_bytes)
-    if len(raw) < ihl + udp_header.length:
-        raise ValueError("packet shorter than UDP length declares")
-    udp_segment = raw[ihl: ihl + udp_header.length]
-    payload = udp_segment[UDP_HEADER_SIZE:]
-    return {
-        "src_ip": src_ip,
-        "dst_ip": dst_ip,
-        "udp_header": udp_header,
-        "udp_segment": udp_segment,
-        "payload": payload,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +87,7 @@ class SRFTUDPClient:
         self.timeout = timeout
         self.output_dir = Path(output_dir)
 
-        # Raw socket used exclusively for SENDING — allows us to build custom IP+UDP headers
+        # Raw socket used exclusively for SENDING — allows the configuration of custom IP+UDP headers
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_UDP)
         self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
 

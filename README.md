@@ -26,7 +26,7 @@ This repository contains our implementation of a Simple Reliable File Transfer (
 Open a terminal and run:
 
 ```bash
-python3 -c "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.connect((‘8.8.8.8’,80)); print(s.getsockname()[0])"
+python3 -c "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.connect(('8.8.8.8',80)); print(s.getsockname()[0])"
 ```
 
 This prints your machine’s active local IP (e.g. `192.168.1.42`). Use this value in the commands below — **do not use `127.0.0.1`**, as macOS does not reliably deliver raw socket packets on the loopback interface.
