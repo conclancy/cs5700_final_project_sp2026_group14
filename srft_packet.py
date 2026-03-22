@@ -6,9 +6,7 @@ headers. Used by both srft_udpserver.py and srft_udpclient.py.
 """
 
 from __future__ import annotations
-
 import struct
-
 from config import SRFT_HEADER_FORMAT, SRFT_HEADER_SIZE
 
 
