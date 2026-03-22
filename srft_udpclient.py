@@ -1,15 +1,502 @@
-from client import Client
-from datagram import Datagram
+"""
+SRFT UDP Client - Phase 1 Implementation
 
-# code just for testing if functions are working
-client = Client()
+Requests a file from the SRFT server by sending a SYN packet containing the
+filename, then receives the file in numbered DATA packets using the Go-Back-N
+receiver protocol, sends cumulative ACKs, and writes the received file to disk.
 
-# read from file (get data) -> split data into chunks -> create datagrams
-data = client.read_file('sample.txt')
-split_data = client.split_data(data, 10)
-datagrams = client.make_datagrams(split_data)
+Usage:
+    sudo python srft_udpclient.py filename=<name> [dest_ip=<ip>] [dest_port=<port>] [src_port=<port>]
 
-for i in range(0, len(datagrams)):
-    print(datagrams[i])
-    print(split_data[i])
-    print("------------------------------------------------")
+Example (both client and server on same machine):
+    Terminal 1: sudo python srft_udpserver.py
+    Terminal 2: sudo python srft_udpclient.py filename=sample.txt dest_ip=<your-local-ip> dest_port=9000
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import select
+import socket
+import struct
+import sys
+import platform
+import time
+from datetime import timedelta
+from pathlib import Path
+
+from config import (
+    FLAG_ACK,
+    FLAG_DATA,
+    FLAG_ERR,
+    FLAG_FIN,
+    FLAG_SYN,
+    IP_HEADER_FORMAT,
+    IP_HEADER_SIZE,
+    SRFT_HEADER_FORMAT,
+    SRFT_HEADER_SIZE,
+    SRFT_PORT,
+    UDP_HEADER_SIZE,
+)
+from header import UDPHeader, verify_checksum
+
+
+# ---------------------------------------------------------------------------
+# SRFT Packet Utilities (mirrors the server-side helpers)
+# ---------------------------------------------------------------------------
+
+def compute_payload_checksum(data: bytes) -> int:
+    """32-bit modular sum checksum used in the SRFT layer."""
+    checksum = 0
+    for byte in data:
+        checksum = (checksum + byte) & 0xFFFFFFFF
+    return checksum
+
+
+def build_srft_packet(flags: int, seq_num: int, ack_num: int, payload: bytes) -> bytes:
+    """Build a complete SRFT header + payload byte string."""
+    payload = bytes(payload)
+    hdr_no_chk = struct.pack(SRFT_HEADER_FORMAT, flags, seq_num, ack_num, len(payload), 0)
+    checksum = compute_payload_checksum(hdr_no_chk[:-4] + payload)
+    return struct.pack(SRFT_HEADER_FORMAT, flags, seq_num, ack_num, len(payload), checksum) + payload
+
+
+def parse_srft_packet(data: bytes) -> dict:
+    """Parse an SRFT header and return a dict of fields."""
+    if len(data) < SRFT_HEADER_SIZE:
+        raise ValueError("data too short for SRFT header")
+    flags, seq_num, ack_num, payload_len, checksum = struct.unpack(
+        SRFT_HEADER_FORMAT, data[:SRFT_HEADER_SIZE]
+    )
+    payload = data[SRFT_HEADER_SIZE: SRFT_HEADER_SIZE + payload_len]
+    if len(payload) != payload_len:
+        raise ValueError("payload length mismatch")
+    return {
+        "flags": flags,
+        "seq_num": seq_num,
+        "ack_num": ack_num,
+        "payload_len": payload_len,
+        "checksum": checksum,
+        "payload": payload,
+    }
+
+
+def is_corrupt(pkt: dict) -> bool:
+    """Return True if the SRFT checksum does not match the recomputed value."""
+    hdr_no_chk = struct.pack(
+        SRFT_HEADER_FORMAT,
+        int(pkt["flags"]),
+        int(pkt["seq_num"]),
+        int(pkt["ack_num"]),
+        int(pkt["payload_len"]),
+        0,
+    )
+    expected = compute_payload_checksum(hdr_no_chk[:-4] + pkt["payload"])
+    return expected != int(pkt["checksum"])
+
+
+def ip_checksum(data: bytes) -> int:
+    """One's complement 16-bit IPv4 header checksum."""
+    if len(data) % 2:
+        data += b"\x00"
+    total = 0
+    for i in range(0, len(data), 2):
+        total += (data[i] << 8) + data[i + 1]
+        total = (total & 0xFFFF) + (total >> 16)
+    return (~total) & 0xFFFF
+
+
+def parse_ipv4_packet(raw: bytes) -> dict:
+    """
+    Parse an IPv4 + UDP packet from raw bytes.
+
+    Returns a dict with src_ip, dst_ip, udp_header, udp_segment, and payload.
+    Raises ValueError for malformed packets.
+    """
+    if len(raw) < IP_HEADER_SIZE + UDP_HEADER_SIZE:
+        raise ValueError("packet too short")
+    version_ihl = raw[0]
+    version = version_ihl >> 4
+    ihl = (version_ihl & 0x0F) * 4
+    if version != 4:
+        raise ValueError("not IPv4")
+    if len(raw) < ihl + UDP_HEADER_SIZE:
+        raise ValueError("packet shorter than IP header declares")
+    src_ip = socket.inet_ntoa(raw[12:16])
+    dst_ip = socket.inet_ntoa(raw[16:20])
+    udp_hdr_bytes = raw[ihl: ihl + UDP_HEADER_SIZE]
+    udp_header = UDPHeader.from_bytes(udp_hdr_bytes)
+    if len(raw) < ihl + udp_header.length:
+        raise ValueError("packet shorter than UDP length declares")
+    udp_segment = raw[ihl: ihl + udp_header.length]
+    payload = udp_segment[UDP_HEADER_SIZE:]
+    return {
+        "src_ip": src_ip,
+        "dst_ip": dst_ip,
+        "udp_header": udp_header,
+        "udp_segment": udp_segment,
+        "payload": payload,
+    }
+
+
+# ---------------------------------------------------------------------------
+# SRFT UDP Client
+# ---------------------------------------------------------------------------
+
+class SRFTUDPClient:
+    """
+    Go-Back-N receiver side of the SRFT file transfer protocol.
+
+    The client:
+    1. Sends a SYN packet carrying the filename to the server.
+    2. Receives DATA packets, delivers them in order, buffers out-of-order ones.
+    3. Sends cumulative ACKs (batched — not one ACK per packet).
+    4. Receives a FIN packet, sends a final ACK, then writes the file to disk.
+
+    Attributes:
+        src_ip:      Local IP address used as the packet source.
+        src_port:    Local UDP port used as the packet source.
+        server_ip:   Server IP address to send SYN/ACK packets to.
+        server_port: Server UDP port.
+        timeout:     Seconds to wait for a packet before triggering timeout logic.
+        output_dir:  Directory where the received file will be written.
+    """
+
+    # Send a cumulative ACK after this many consecutive in-order packets
+    ACK_BATCH_SIZE = 4
+
+    # Also send ACK if this many seconds have passed since the last one (delayed ACK)
+    ACK_DELAY = 0.05
+
+    def __init__(
+        self,
+        src_ip: str,
+        src_port: int,
+        server_ip: str,
+        server_port: int,
+        timeout: float = 2.0,
+        output_dir: str = ".",
+    ) -> None:
+        self.src_ip = src_ip
+        self.src_port = src_port
+        self.server_ip = server_ip
+        self.server_port = server_port
+        self.timeout = timeout
+        self.output_dir = Path(output_dir)
+
+        # Raw socket used exclusively for SENDING — allows us to build custom IP+UDP headers
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_UDP)
+        self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+
+        # Regular UDP socket used exclusively for RECEIVING.
+        # On macOS, raw sockets do not receive packets sent from processes on the same machine.
+        # A SOCK_DGRAM socket is registered with the kernel's UDP demultiplexer and reliably
+        # receives any properly-addressed UDP packet, including those injected by raw sockets.
+        self.recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.recv_sock.bind((self.src_ip, self.src_port))
+
+        # Receiver state
+        self.next_expected: int = 0               # Next in-order seq num expected
+        self.recv_buf: dict[int, bytes] = {}      # Out-of-order packet buffer
+        self.chunks: dict[int, bytes] = {}        # In-order delivered chunks
+        self.fin_seq: int = -1
+        self.ip_pkt_id: int = 0
+
+        # Counters for transfer report
+        self.pkts_received: int = 0
+        self.acks_sent: int = 0
+        self.start_time: float = 0.0
+        self.end_time: float = 0.0
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def request_file(self, filename: str) -> None:
+        """
+        Send a SYN for the given filename, receive the file, and write it to disk.
+
+        Args:
+            filename: The name of the file to request from the server.
+        """
+        print(f"Requesting '{filename}' from {self.server_ip}:{self.server_port}")
+        self.start_time = time.time()
+
+        self._send_syn(filename)
+        syn_sent_at = self.start_time
+        got_data = False
+        last_ack_time = self.start_time
+        since_last_ack = 0
+
+        while True:
+            pkt = self._recv_packet(self.timeout)
+
+            if pkt is None:
+                # Timeout — either resend SYN or send a duplicate ACK
+                if not got_data:
+                    if time.time() - syn_sent_at >= self.timeout:
+                        print("No response from server, resending SYN...")
+                        self._send_syn(filename)
+                        syn_sent_at = time.time()
+                else:
+                    # Mid-transfer: duplicate ACK signals the server to retransmit
+                    self._send_ack(self.next_expected)
+                    last_ack_time = time.time()
+                    since_last_ack = 0
+                continue
+
+            # Ignore packets not from the server
+            if pkt["src_ip"] != self.server_ip or pkt["src_port"] != self.server_port:
+                continue
+
+            flags = pkt["srft"]["flags"]
+            seq = pkt["srft"]["seq_num"]
+            payload = pkt["srft"]["payload"]
+            self.pkts_received += 1
+            got_data = True
+
+            if flags & FLAG_DATA:
+                if seq == self.next_expected:
+                    # In-order: deliver immediately
+                    self.chunks[seq] = payload
+                    self.next_expected += 1
+                    since_last_ack += 1
+
+                    # Deliver any contiguous buffered out-of-order packets
+                    while self.next_expected in self.recv_buf:
+                        self.chunks[self.next_expected] = self.recv_buf.pop(self.next_expected)
+                        self.next_expected += 1
+                        since_last_ack += 1
+
+                    # Send a batched cumulative ACK
+                    now = time.time()
+                    if since_last_ack >= self.ACK_BATCH_SIZE or (now - last_ack_time) >= self.ACK_DELAY:
+                        self._send_ack(self.next_expected)
+                        last_ack_time = now
+                        since_last_ack = 0
+
+                elif seq > self.next_expected:
+                    # Out-of-order: buffer and send a duplicate ACK
+                    if seq not in self.recv_buf and seq not in self.chunks:
+                        self.recv_buf[seq] = payload
+                    self._send_ack(self.next_expected)
+                    last_ack_time = time.time()
+                    since_last_ack = 0
+
+                else:
+                    # Duplicate: re-ACK so the server can advance its window
+                    self._send_ack(self.next_expected)
+
+            elif flags & FLAG_FIN:
+                # Flush any pending data ACK first, then ACK the FIN
+                if since_last_ack > 0:
+                    self._send_ack(self.next_expected)
+                self.fin_seq = seq
+                self._send_ack(seq + 1)
+                print(f"FIN received (seq={seq}), transfer complete.")
+                break
+
+            elif flags & FLAG_ERR:
+                print(f"Server error: {payload.decode(errors='replace')}")
+                return
+
+        # Send a few extra FIN ACKs to handle server retransmits of FIN
+        for _ in range(3):
+            self._send_ack(self.fin_seq + 1)
+            time.sleep(0.05)
+
+        self.end_time = time.time()
+        self._write_file(filename)
+        self._write_report(filename)
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    def _write_file(self, filename: str) -> None:
+        """Assemble received chunks in sequence order and write to disk."""
+        if not self.chunks:
+            print("Warning: no data received.")
+            return
+
+        max_seq = max(self.chunks.keys())
+        file_data = b"".join(
+            self.chunks[i] for i in range(max_seq + 1) if i in self.chunks
+        )
+
+        out_path = self.output_dir / f"received_{Path(filename).name}"
+        out_path.write_bytes(file_data)
+
+        md5 = hashlib.md5(file_data).hexdigest()
+        print(f"File written : {out_path}  ({len(file_data)} bytes)")
+        print(f"MD5          : {md5}")
+
+    def _write_report(self, filename: str) -> None:
+        """Write the client-side transfer report."""
+        duration = str(timedelta(seconds=max(0, int(self.end_time - self.start_time))))
+        lines = [
+            f"Name of the transferred file: {filename}",
+            f"The number of packets received from the server: {self.pkts_received}",
+            f"The number of ACKs sent to the server: {self.acks_sent}",
+            f"The time duration of the file transfer (hh:min:ss): {duration}",
+        ]
+        report_path = self.output_dir / "client_transfer_report.txt"
+        report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        print(f"Report       : {report_path}")
+
+    def _send_syn(self, filename: str) -> None:
+        """Send a SYN packet with the filename as payload."""
+        srft_payload = build_srft_packet(FLAG_SYN, 0, 0, filename.encode())
+        self.sock.sendto(self._build_packet(srft_payload), (self.server_ip, self.server_port))
+
+    def _send_ack(self, ack_num: int) -> None:
+        """Send a cumulative ACK packet."""
+        srft_payload = build_srft_packet(FLAG_ACK, 0, ack_num, b"")
+        self.sock.sendto(self._build_packet(srft_payload), (self.server_ip, self.server_port))
+        self.acks_sent += 1
+
+    def _recv_packet(self, timeout: float) -> dict | None:
+        """
+        Wait up to `timeout` seconds for a valid SRFT packet via the DGRAM receive socket.
+
+        The DGRAM socket delivers only the UDP payload (the SRFT data), with the IP and
+        UDP headers already stripped by the kernel.  The kernel also validates the UDP
+        checksum before delivery, so no manual checksum check is needed here.
+
+        Returns a dict with src_ip, src_port, and srft fields, or None on timeout or
+        any parse/validation failure.
+        """
+        readable, _, _ = select.select([self.recv_sock], [], [], timeout)
+        if not readable:
+            return None
+
+        # recvfrom on a DGRAM socket returns (udp_payload, (src_ip, src_port))
+        payload, addr = self.recv_sock.recvfrom(65535)
+        src_ip, src_port = addr
+
+        if not isinstance(payload, bytes):
+            return None
+
+        try:
+            srft = parse_srft_packet(payload)
+        except ValueError:
+            return None
+
+        if is_corrupt(srft):
+            return None
+
+        return {
+            "src_ip": src_ip,
+            "src_port": src_port,
+            "srft": srft,
+        }
+
+    def _build_packet(self, srft_payload: bytes) -> bytes:
+        """Build a complete IPv4 + UDP + SRFT byte string."""
+        udp_hdr = UDPHeader(src_port=self.src_port, dst_port=self.server_port)
+        udp_bytes = udp_hdr.to_bytes_with_checksum(srft_payload, self.src_ip, self.server_ip)
+        udp_pkt = udp_bytes + srft_payload
+        ip_hdr = self._build_ip_header(IP_HEADER_SIZE + len(udp_pkt))
+        return ip_hdr + udp_pkt
+
+    def _build_ip_header(self, total_len: int) -> bytes:
+        """
+        Construct an IPv4 header with the correct checksum.
+
+        On macOS/BSD with IP_HDRINCL, the kernel requires ip_len and ip_off to
+        be in host byte order rather than network byte order.  All other fields
+        remain in network (big-endian) byte order.
+        """
+        version_ihl = (4 << 4) + 5
+        pkt_id = self.ip_pkt_id & 0xFFFF
+        self.ip_pkt_id += 1
+        src = socket.inet_aton(self.src_ip)
+        dst = socket.inet_aton(self.server_ip)
+
+        if platform.system() == "Darwin":
+            # ip_len and ip_off must be in host byte order on macOS
+            hdr_no_chk = (
+                struct.pack("!BB", version_ihl, 0) +       # version_ihl, tos
+                struct.pack("=H", total_len) +             # ip_len:  host byte order
+                struct.pack("!H", pkt_id) +                # ip_id:   network byte order
+                struct.pack("=H", 0) +                     # ip_off:  host byte order
+                struct.pack("!BBH4s4s", 64, socket.IPPROTO_UDP, 0, src, dst)
+            )
+            chk = ip_checksum(hdr_no_chk)
+            return (
+                struct.pack("!BB", version_ihl, 0) +
+                struct.pack("=H", total_len) +
+                struct.pack("!H", pkt_id) +
+                struct.pack("=H", 0) +
+                struct.pack("!BBH4s4s", 64, socket.IPPROTO_UDP, chk, src, dst)
+            )
+        else:
+            hdr_no_chk = struct.pack(
+                IP_HEADER_FORMAT,
+                version_ihl, 0, total_len, pkt_id, 0, 64, socket.IPPROTO_UDP, 0, src, dst,
+            )
+            chk = ip_checksum(hdr_no_chk)
+            return struct.pack(
+                IP_HEADER_FORMAT,
+                version_ihl, 0, total_len, pkt_id, 0, 64, socket.IPPROTO_UDP, chk, src, dst,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+
+def get_local_ip() -> str:
+    """Detect the primary local IP address by routing to a public host."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+
+
+def parse_args(argv: list[str]) -> dict[str, str]:
+    kwargs: dict[str, str] = {}
+    for arg in argv:
+        if "=" in arg:
+            key, value = arg.split("=", 1)
+            kwargs[key] = value
+    return kwargs
+
+
+def main() -> None:
+    if os.geteuid() != 0:
+        print("Error: raw sockets require root. Run with sudo.")
+        sys.exit(1)
+
+    kw = parse_args(sys.argv[1:])
+
+    filename = kw.get("filename")
+    if not filename:
+        print(
+            "Usage: sudo python srft_udpclient.py filename=<name> "
+            "[dest_ip=<ip>] [dest_port=<port>] [src_port=<port>] [timeout=<sec>]"
+        )
+        sys.exit(1)
+
+    server_ip   = kw.get("dest_ip", get_local_ip())
+    server_port = int(kw.get("dest_port", "9000"))
+    src_port    = int(kw.get("src_port", str(SRFT_PORT)))
+    src_ip      = kw.get("src_ip", get_local_ip())
+    timeout     = float(kw.get("timeout", "2.0"))
+
+    client = SRFTUDPClient(
+        src_ip=src_ip,
+        src_port=src_port,
+        server_ip=server_ip,
+        server_port=server_port,
+        timeout=timeout,
+    )
+    client.request_file(filename)
+
+
+if __name__ == "__main__":
+    main()
