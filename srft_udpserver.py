@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import timedelta
 import os
+import platform
 import select
 import socket
 import struct
@@ -27,231 +28,17 @@ from config import (
     UDP_HEADER_SIZE,
     IP_HEADER_FORMAT,
     IP_HEADER_SIZE,
-    SRFT_HEADER_FORMAT,
     SRFT_HEADER_SIZE,
     REPORT_PATH,
 )
-from header import UDPHeader, verify_checksum
+from header import UDPHeader
+from srft_packet import build_srft_packet, ip_checksum, is_corrupt, parse_srft_packet
 
 # Set default chunk size based on the default MTU minus the sizes of the IPv4, UDP, and SRFT headers
 DEFAULT_MTU = 1400
 DEFAULT_CHUNK_SIZE = DEFAULT_MTU - IP_HEADER_SIZE - UDP_HEADER_SIZE - SRFT_HEADER_SIZE
 MAX_IP_PACKET_ID = 0xFFFF
 
-
-def compute_payload_checksum(data: bytes) -> int:
-    """
-    Compute a simple checksum for the SRFT layer.
-
-    Uses a 32-bit modular sum over the SRFT header without checksum and payload in order 
-    to detect corruption in the SRFT layer
-
-    Args:
-        data: The bytes over which to compute the checksum
-    Returns:
-        A 32-bit integer checksum value
-    """
-
-    # Set initial checksum to 0, then add every byte 
-    checksum = 0
-
-    # Add bytes and take the results to 2^32
-    for byte in data:
-        checksum = (checksum + byte) & 0xFFFFFFFF
-    
-    return checksum
-
-
-def build_srft_packet(flags: int, seq_num: int, ack_num: int, payload: bytes) -> bytes:
-    """
-    Build the SRFT payload carried inside the UDP segment
-
-    Args:
-        flags: The SRFT flags byte (ex: FLAG_SYN, FLAG_ACK, etc.)
-        seq_num: The sequence number for this packet
-        ack_num: The cumulative acknowledgement number for this packet
-        payload: The file data or control message to include in the packet
-    Returns:
-        The complete SRFT header and payload bytes to be included in the UDP segment
-    """
-
-    # Validate that the payload is bytes before attempting to build the packet
-    if not isinstance(payload, (bytes, bytearray)):
-        raise TypeError("payload must be bytes-like")
-
-    # Ensure the payload is of type bytes for consistent processing and checksum calculation
-    payload = bytes(payload)
-
-    # Build the initial header with a placeholder checksum of 0
-    header_without_checksum = struct.pack(
-        SRFT_HEADER_FORMAT,
-        flags,
-        seq_num,
-        ack_num,
-        len(payload),
-        0,
-    )
-
-    # Generate the checksum using the initial header
-    checksum = compute_payload_checksum(header_without_checksum[:-4] + payload)
-
-    # Generate and return the final SRFT packet with the correct checksum included in the header
-    return struct.pack(
-        SRFT_HEADER_FORMAT,
-        flags,
-        seq_num,
-        ack_num,
-        len(payload),
-        checksum,
-    ) + payload
-
-
-def parse_srft_packet(payload_bytes: bytes) -> dict[str, int | bytes]:
-    """
-    Parse the SRFT header and payload from UDP payload bytes
-
-    Args:
-        payload_bytes: The raw bytes from the UDP payload, which should contain the SRFT header
-    Returns:
-        Dictionary with the parsed SRFT fields: flags, seq_num, ack_num, payload_len, checksum, 
-        and the payload data itself
-    """
-
-    # Validate that the payload is long enough to contain the SRFT header
-    if len(payload_bytes) < SRFT_HEADER_SIZE:
-        raise ValueError("payload is too short for SRFT header")
-
-    # Unpack the SRFT header fields and extract the payload based on the declared length
-    flags, seq_num, ack_num, payload_len, checksum = struct.unpack(
-        SRFT_HEADER_FORMAT, payload_bytes[:SRFT_HEADER_SIZE]
-    )
-
-    # Extract the payload bytes based on the payload length declared in the header
-    payload = payload_bytes[SRFT_HEADER_SIZE:SRFT_HEADER_SIZE + payload_len]
-
-    # Validate that the actual payload length matches the length declared in the header
-    if len(payload) != payload_len:
-        raise ValueError("payload length does not match SRFT header")
-
-    # Return a dictionary containing the parsed fields and the payload
-    return {
-        "flags": flags,
-        "seq_num": seq_num,
-        "ack_num": ack_num,
-        "payload_len": payload_len,
-        "checksum": checksum,
-        "payload": payload,
-    }
-
-
-def is_corrupt(packet_dict: dict[str, int | bytes]) -> bool:
-    """
-    Validate the SRFT checksum carried in the packet
-
-    Args:
-        packet_dict: Dictionary containing the parsed SRFT fields with the payload and checksum
-    Returns:
-        False if the packet is not corrupt. This is the expected behvaior for valid packets
-        True if the computed checksum does not match the checksum in the packet, indicating corruption
-    """
-
-    # Extract the payload and ensure it's bytes
-    payload = packet_dict["payload"]
-    if not isinstance(payload, bytes):
-        raise TypeError("packet payload must be bytes")
-
-    # Recompute the checksum over the header (with checksum field set to 0) and payload
-    header_without_checksum = struct.pack(
-        SRFT_HEADER_FORMAT,
-        int(packet_dict["flags"]),
-        int(packet_dict["seq_num"]),
-        int(packet_dict["ack_num"]),
-        int(packet_dict["payload_len"]),
-        0,
-    )
-
-    # The packet is considered corrupt if the recomputed checksum does not match the checksum in the packet
-    expected = compute_payload_checksum(header_without_checksum[:-4] + payload)
-    return expected != int(packet_dict["checksum"])
-
-
-def ip_checksum(data: bytes) -> int:
-    """
-    Compute the IPv4 header checksum
-
-    Args:
-        data: The bytes of the IPv4 header with the checksum field set to 0
-    Returns:
-        The 16-bit checksum value to be included in the IPv4 header
-    """
-
-    # If the data length is odd, pad with a zero byte to make it even for 16-bit processing
-    if len(data) % 2 != 0:
-        data += b"\x00"
-
-    # Compute the checksum as the one's complement of the sum of 16-bit words
-    total = 0
-
-    # Iterate over the data in 16-bit chunks, summing them and adding any carry back into the total
-    for index in range(0, len(data), 2):
-        word = (data[index] << 8) + data[index + 1]
-        total += word
-        total = (total & 0xFFFF) + (total >> 16)
-
-    # Return the one's complement of the total as the final checksum value
-    return (~total) & 0xFFFF
-
-
-def parse_ipv4_packet(packet: bytes) -> dict[str, object]:
-    """
-    Parse the IPv4 and UDP headers from a raw packet
-
-    Args:
-        packet: Raw bytes received from the socket containing an IPv4 header followed by a UDP segment
-    Returns:
-        A dictionary containing the source and destination IP addresses, the parsed UDP header, the raw UDP
-    """
-
-    # Validate that the packet is long enough to contain both the IPv4 header and the UDP header
-    if len(packet) < IP_HEADER_SIZE + UDP_HEADER_SIZE:
-        raise ValueError("packet is too short")
-
-    # Extract the version and IHL from the first byte of the IPv4 header to determine the header length
-    version_ihl = packet[0]
-    version = version_ihl >> 4
-    ihl = (version_ihl & 0x0F) * 4
-
-    # Validate that the packet is IPv4
-    if version != 4:
-        raise ValueError("only IPv4 packets are supported")
-
-    # Validate that the packet is long enough to contain the full IPv4 header based on the IHL
-    if len(packet) < ihl + UDP_HEADER_SIZE:
-        raise ValueError("packet is shorter than declared IPv4 header length")
-
-    # Extract the source and destination IP addresses from the IPv4 header
-    src_ip = socket.inet_ntoa(packet[12:16])
-    dst_ip = socket.inet_ntoa(packet[16:20])
-
-    # Extract the UDP header bytes based on the IHL and parse it into a UDPHeader object
-    udp_header_bytes = packet[ihl:ihl + UDP_HEADER_SIZE]
-    udp_header = UDPHeader.from_bytes(udp_header_bytes)
-
-    # Validate that the packet is long enough to contain the full UDP segment
-    if len(packet) < ihl + udp_header.length:
-        raise ValueError("packet is shorter than declared UDP length")
-
-    # Extract the raw UDP segment bytes, which include the UDP header and the payload
-    udp_segment = packet[ihl:ihl + udp_header.length]
-    payload = udp_segment[UDP_HEADER_SIZE:]
-
-    return {
-        "src_ip": src_ip,
-        "dst_ip": dst_ip,
-        "udp_header": udp_header,
-        "udp_segment": udp_segment,
-        "payload": payload,
-    }
 
 
 @dataclass
@@ -315,14 +102,19 @@ class SRFTUDPServer:
         self.chunk_size = chunk_size
         self.report_path = Path(report_path)
 
-        # Create a raw socket for receiving and sending UDP packets
+        # Raw socket used exclusively for SENDING — allows us to build custom IP+UDP headers
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_UDP)
-
-        # Set the IP_HDRINCL option to include our own IPv4 headers
         self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
 
-        # Bind the socket to the specified IP and port to listen for incoming requests
-        self.sock.bind((self.bind_ip, self.bind_port))
+        # Regular UDP socket used exclusively for RECEIVING.
+        # On macOS, raw sockets do not receive packets sent from processes on the same machine
+        # because the kernel routes same-machine traffic through an internal loopback path that
+        # bypasses raw socket delivery.  A SOCK_DGRAM socket is registered with the kernel's UDP
+        # demultiplexer and reliably receives any properly-addressed UDP packet, including those
+        # injected by raw sockets on the same host.
+        self.recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.recv_sock.bind((self.bind_ip, self.bind_port))
 
         # Initialize threading and synchronization variables for managing the file transfer
         self.transfer_lock = threading.Lock()
@@ -649,84 +441,51 @@ class SRFTUDPServer:
 
     def _receive_srft_packet(self, timeout: float | None) -> dict[str, object] | None:
         """
-        Receive and validate one SRFT packet from the raw socket.
+        Receive and validate one SRFT packet via the DGRAM receive socket.
+
+        The DGRAM socket delivers only the UDP payload (the SRFT data), with the IP
+        and UDP headers already stripped by the kernel.  The kernel also validates the
+        UDP checksum before delivery, so no manual checksum check is needed here.
 
         Args:
-            timeout: The maximum time in seconds to wait for a packet before returning None
-        
+            timeout: Seconds to wait for a packet; None blocks indefinitely.
         Returns:
-            A dictionary containing the source IP, destination IP, source port, destination port, 
-            and the parsed SRFT packet if a valid packet is received. Returns `None` if no valid 
-            packet is received within the timeout or if any validation step fails
+            A dict with src_ip, src_port, and the parsed srft_packet, or None on
+            timeout or any validation failure.
         """
 
-        # Wait for a packet to be available on the socket with the specified timeout
-        # If timeout is None, wait until a packet is received 
+        # Wait for a packet on the DGRAM receive socket
         if timeout is None:
-            readable, _, _ = select.select([self.sock], [], [])
-        # Otherwise, wait for a packet until the timeout expires and return None if no packet is received
+            readable, _, _ = select.select([self.recv_sock], [], [])
         else:
-            readable, _, _ = select.select([self.sock], [], [], timeout)
+            readable, _, _ = select.select([self.recv_sock], [], [], timeout)
 
-        # Return None if no packet is available to read
         if not readable:
             return None
 
-        # Read the raw packet bytes from the socket assuming a max size of 65535 bytes (size of IPv4 packet)
-        raw_packet, _ = self.sock.recvfrom(65535)
+        # recvfrom on a DGRAM socket returns (udp_payload, (src_ip, src_port))
+        payload, addr = self.recv_sock.recvfrom(65535)
+        src_ip, src_port = addr
 
-        # Try to parse the raw packet as an IPv4 packet containing a UDP segment with an SRFT payload
-        try:
-            parsed_packet = parse_ipv4_packet(raw_packet)
-        # Return None and a ValueError if the parsing fails 
-        except ValueError:
-            return None
-
-        # Extract the UDP segment and source/destination IPs from the parsed packet for checksum verification
-        udp_segment = parsed_packet["udp_segment"]
-        src_ip = parsed_packet["src_ip"]
-        dst_ip = parsed_packet["dst_ip"]
-
-        # Verify type is UDP Segment or Bytes
-        if not isinstance(udp_segment, bytes):
-            return None
-
-        # Verify the UDP Checksum
-        if not verify_checksum(udp_segment, src_ip=src_ip, dst_ip=dst_ip):
-            return None
-
-        # Extract the SRFT payload from the UDP segment
-        payload = parsed_packet["payload"]
-
-        # Verify that the payload is bytes before attempting to parse it as an SRFT packet
         if not isinstance(payload, bytes):
             return None
 
-        # Try to parse the SRFT packet from the payload bytes and return None if parsing fails
+        # Parse and validate the SRFT layer
         try:
             srft_packet = parse_srft_packet(payload)
         except ValueError:
             return None
 
-        # Return None if the packet does not pass corruption check
         if is_corrupt(srft_packet):
             return None
 
-        # Increment the count of packets received from the client for reporting purposes
         self.packets_received_count += 1
-
-        # Extract the UDP header from the parsed packet
-        udp_header = parsed_packet["udp_header"]
-        
-        # Validate that it is a UDPHeader object before returning the packet info
-        if not isinstance(udp_header, UDPHeader):
-            return None
 
         return {
             "src_ip": src_ip,
-            "dst_ip": dst_ip,
-            "src_port": udp_header.src_port,
-            "dst_port": udp_header.dst_port,
+            "dst_ip": self.bind_ip,
+            "src_port": src_port,
+            "dst_port": self.bind_port,
             "srft_packet": srft_packet,
         }
 
@@ -844,7 +603,11 @@ class SRFTUDPServer:
 
     def _build_ip_header(self, total_length: int) -> bytes:
         """
-        Construct an IPv4 header for a raw UDP packet
+        Construct an IPv4 header for a raw UDP packet.
+
+        On macOS/BSD with IP_HDRINCL, the kernel requires ip_len and ip_off to
+        be in host byte order rather than network byte order.  All other fields
+        remain in network (big-endian) byte order.
 
         Args:
             total_length: The total length of the IPv4 packet including the header and UDP segment
@@ -852,52 +615,45 @@ class SRFTUDPServer:
             The bytes of the IPv4 header with the correct fields set and the checksum computed
         """
 
-        # Set the IPv4 header fields
-        version = 4
-        ihl = 5
-        version_ihl = (version << 4) + ihl
+        version_ihl = (4 << 4) + 5
         tos = 0
         packet_id = self.ip_packet_id & MAX_IP_PACKET_ID
         self.ip_packet_id += 1
         flags_fragment_offset = 0
         ttl = 64
         protocol = socket.IPPROTO_UDP
-        checksum = 0
         src_ip = socket.inet_aton(self.bind_ip)
         dst_ip = socket.inet_aton(self.client_ip)
 
-        # Generate the header without the checksum for caluclation
-        header_without_checksum = struct.pack(
-            IP_HEADER_FORMAT,
-            version_ihl,
-            tos,
-            total_length,
-            packet_id,
-            flags_fragment_offset,
-            ttl,
-            protocol,
-            checksum,
-            src_ip,
-            dst_ip,
-        )
-
-        # Generate the checksum
-        checksum = ip_checksum(header_without_checksum)
-
-        # Build the final header with the calculated checksum and return the bytes
-        return struct.pack(
-            IP_HEADER_FORMAT,
-            version_ihl,
-            tos,
-            total_length,
-            packet_id,
-            flags_fragment_offset,
-            ttl,
-            protocol,
-            checksum,
-            src_ip,
-            dst_ip,
-        )
+        if platform.system() == "Darwin":
+            # ip_len and ip_off must be in host byte order on macOS
+            hdr_no_chk = (
+                struct.pack("!BB", version_ihl, tos) +
+                struct.pack("=H", total_length) +                  # ip_len:  host byte order
+                struct.pack("!H", packet_id) +                     # ip_id:   network byte order
+                struct.pack("=H", flags_fragment_offset) +         # ip_off:  host byte order
+                struct.pack("!BBH4s4s", ttl, protocol, 0, src_ip, dst_ip)
+            )
+            checksum = ip_checksum(hdr_no_chk)
+            return (
+                struct.pack("!BB", version_ihl, tos) +
+                struct.pack("=H", total_length) +
+                struct.pack("!H", packet_id) +
+                struct.pack("=H", flags_fragment_offset) +
+                struct.pack("!BBH4s4s", ttl, protocol, checksum, src_ip, dst_ip)
+            )
+        else:
+            hdr_no_chk = struct.pack(
+                IP_HEADER_FORMAT,
+                version_ihl, tos, total_length, packet_id,
+                flags_fragment_offset, ttl, protocol, 0, src_ip, dst_ip,
+            )
+            checksum = ip_checksum(hdr_no_chk)
+            return struct.pack(
+                IP_HEADER_FORMAT,
+                version_ihl, tos, total_length, packet_id,
+                flags_fragment_offset, ttl, protocol, checksum, src_ip, dst_ip,
+            )
 
     def _reset_transfer_state(self) -> None:
         """

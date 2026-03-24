@@ -163,26 +163,6 @@ def _build_udp_pseudo_header(src_ip: str, dst_ip: str, udp_length: int) -> bytes
     return struct.pack("!4s4sBBH", src.packed, dst.packed, 0, UDP_PROTOCOL_NUMBER, udp_length)
 
 
-def build_udp_header(src_port: int, dst_port: int, datagram: bytes,
-                     src_ip: str, dst_ip: str) -> bytes:
-    """
-    Construct an 8-byte UDP header with checksum
-
-    The UDP checksum is computed over a by concatenating the UDP header and payload.
-   
-    Args:
-        src_port:   Source port number
-        dst_port:   Destination port number
-        datagram:   The datagram (as bytes) to be sent in the UDP packet
-        src_ip:     Source IP 
-        dst_ip:     Destination IP
-
-    Returns:
-        struct: An 8-byte bytes object representing the UDP header
-    """
-    header = UDPHeader(src_port=src_port, dst_port=dst_port)
-    return header.to_bytes_with_checksum(datagram, src_ip, dst_ip)
-
 def verify_checksum(segment: bytes, src_ip: str | None = None, dst_ip: str | None = None) -> bool:
     """
     Verify checksum of received UDP segment.
