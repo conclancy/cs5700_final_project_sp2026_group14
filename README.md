@@ -9,6 +9,19 @@ This repository contains our implementation of a Simple Reliable File Transfer (
 
 ---
 
+# Project Structure
+
+| File | Description |
+|---|---|
+| `srft.py` | CLI entry point — use this to start the server or client |
+| `srft_udpserver.py` | SRFT server: Go-Back-N sender over raw UDP |
+| `srft_udpclient.py` | SRFT client: Go-Back-N receiver over raw UDP |
+| `srft_packet.py` | Shared packet utilities (build, parse, checksum) |
+| `header.py` | UDP header construction and checksum |
+| `config.py` | Shared constants and protocol parameters |
+
+---
+
 # How to Run Locally
 
 ## Prerequisites
@@ -36,7 +49,7 @@ This prints your machine’s active local IP (e.g. `192.168.1.42`). Use this val
 Open a terminal in the project directory and run:
 
 ```bash
-SRFT_SERVER_IP=<your-local-ip> sudo -E python3 srft_udpserver.py
+sudo python3 srft.py server --ip <your-local-ip>
 ```
 
 The server will print `SRFT server listening on <ip>:9000` and wait for a client request. The file being requested must exist in the directory where the server is running.
@@ -46,7 +59,7 @@ The server will print `SRFT server listening on <ip>:9000` and wait for a client
 Open a **second** terminal in the project directory and run:
 
 ```bash
-sudo python3 srft_udpclient.py filename=<filename> dest_ip=<your-local-ip> dest_port=9000
+sudo python3 srft.py client <filename> --dest-ip <your-local-ip>
 ```
 
 Replace `<filename>` with the name of the file you want to transfer (e.g. `sample.txt`). The file must be present in the server’s working directory.
@@ -54,7 +67,7 @@ Replace `<filename>` with the name of the file you want to transfer (e.g. `sampl
 **Example using `sample.txt`:**
 
 ```bash
-sudo python3 srft_udpclient.py filename=sample.txt dest_ip=192.168.1.42 dest_port=9000
+sudo python3 srft.py client sample.txt --dest-ip 192.168.1.42
 ```
 
 ### Step 4 — Verify the transfer
@@ -68,16 +81,39 @@ md5 received_sample.txt
 
 Both hashes must match. A transfer report is written to `client_transfer_report.txt` and the server writes its report to `transfer_report.txt`.
 
-### Optional server configuration
+---
 
-The server can be configured via environment variables:
+## CLI Reference
 
-| Variable | Default | Description |
+Run `python3 srft.py --help` at any time to see available commands.
+
+### `srft.py server`
+
+```
+sudo python3 srft.py server [--ip IP] [--port PORT] [--window N] [--timeout SEC]
+```
+
+| Flag | Default | Description |
 |---|---|---|
-| `SRFT_SERVER_IP` | `127.0.0.1` | IP address the server binds to |
-| `SRFT_SERVER_PORT` | `9000` | UDP port the server listens on |
-| `SRFT_WINDOW_SIZE` | `5` | Go-Back-N sliding window size |
-| `SRFT_TIMEOUT_SECONDS` | `0.5` | Retransmission timeout in seconds |
+| `--ip` | auto-detected | IP address the server binds to |
+| `--port` | `9000` | UDP port to listen on |
+| `--window` | `5` | Go-Back-N sliding window size |
+| `--timeout` | `0.5` | Retransmission timeout in seconds |
+
+### `srft.py client`
+
+```
+sudo python3 srft.py client FILENAME [--dest-ip IP] [--dest-port PORT] [--src-ip IP] [--src-port PORT] [--timeout SEC]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `FILENAME` | *(required)* | Name of the file to request from the server |
+| `--dest-ip` | auto-detected | Server IP address |
+| `--dest-port` | `9000` | Server UDP port |
+| `--src-ip` | auto-detected | Local IP address to send from |
+| `--src-port` | `12345` | Local UDP port to send from |
+| `--timeout` | `2.0` | Receive timeout in seconds |
 
 ---
 
