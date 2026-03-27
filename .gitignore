@@ -212,3 +212,4 @@ requirements/
 transfer_report.txt
 client_transfer_report.txt
 received_*
+*.pem
