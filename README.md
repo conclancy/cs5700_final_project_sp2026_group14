@@ -165,3 +165,58 @@ ip addr show eth0 | grep "inet " | awk ‘{print $2}’ | cut -d/ -f1
 ```
 
 Then substitute that IP for `<your-local-ip>` in the server and client commands.
+
+# How to Run in AWS
+## Set Up 
+1. Sign into the group [AWS Account](https://388147131160.signin.aws.amazon.com/console)
+2. Naviagte to the [EC2 US-East-2 Landing Page](https://us-east-2.console.aws.amazon.com/ec2/home?region=us-east-2#Instances)
+3. Create a key-pair following the [AWS Key Pair documentation](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/create-key-pairs.html) for each instance. Recomended to store the `.pem` files in the project root. They are automatically ignored by the `.gitignore` file. 
+
+## EC2 Access & Running the Code
+In a terminal on your local machine run the following commands from the reposiroty with your `.pem` files to log into your EC2 instance after completing the **Set Up** instructions above:
+
+### SRFT Server
+#### Login 
+```bash
+ssh -i <Server Key Pair Name>.pem ubuntu@3.147.82.30
+```
+
+Example if your key-pair is named `srft-server-keypair.pem`: 
+```bash
+ssh -i srft-server-keypair.pem ubuntu@3.147.82.30
+```
+
+#### Running the Server
+Tempoarily run the following command until we can fix the ip-mapping issue:
+```bash
+sudo SRFT_SERVER_IP=172.31.1.158 SRFT_SERVER_PORT=9000 python3 srft_udpserver.py
+```
+
+### SRFT Client 
+#### Login 
+```bash
+ssh -i <Cleint Key Pair Name>.pem ubuntu@3.141.2.243
+```
+
+Example if your key-pair is named `srft-cleint-keypair.pem`: 
+```bash
+ssh -i srft-client-keypair.pem ubuntu@3.141.2.243
+```
+
+#### Running the Client
+```bash
+sudo python3 srft.py client <Requesting File Name> --dest-ip 172.31.1.158
+```
+
+Example request for the `sample.txt` file:
+```bash
+sudo python3 srft.py client sample.txt --dest-ip 172.31.1.158
+```
+
+## Migrate Code to the EC2 Instances
+1. Log into the EC2 instances following the steps above.
+2. Run `rm -rf ~/cs5700_final_project_sp2026_group14` to remove the existing copy of the code on the EC2. 
+3. Open a new terminal **on your local machine** and run the following commands:
+    - Server: `scp -r -i srft-server-keypair.pem . ubuntu@3.147.82.30:~/cs5700_final_project_sp2026_group14` 
+    - Client: `scp -r -i cs5700_final_project_sp2026_group14/srft-client-keypair.pem cs5700_final_project_sp2026_group14 ubuntu@3.141.2.243:~`
+4. If successful, the code will now be in the home directory of the EC2 instance. 
