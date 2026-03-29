@@ -37,3 +37,12 @@ FLAG_ACK  = 0x02    # Packet is a cumulative acknowledgement
 FLAG_FIN  = 0x04    # Packet signals end-of-file (no more data)
 FLAG_SYN  = 0x08    # Packet initiates a connection
 FLAG_ERR  = 0x10    # Packet signals an error condition
+
+# Pre-shared key used by both client and server
+# Must be >= 32 bytes for strong security
+PSK = b"SRFT_demo_pre_shared_key_32_bytes_long!!"
+
+# protocol parameters
+CLIENT_NONCE_SIZE = 16
+SERVER_NONCE_SIZE = 16
+SESSION_ID_SIZE = 8
