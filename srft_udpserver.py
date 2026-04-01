@@ -28,6 +28,7 @@ from config import (
     UDP_HEADER_SIZE,
     IP_HEADER_FORMAT,
     IP_HEADER_SIZE,
+    SRFT_HEADER_FORMAT,
     SRFT_HEADER_SIZE,
     REPORT_PATH,
 )
@@ -82,11 +83,14 @@ class SRFTUDPServer:
         window_size: int = 5,
         timeout_seconds: float = 0.5,
 
-        # Allow chun_size and report_path to be overridden by constructor parameters
+        # Allow chunk_size and report_path to be overridden by constructor parameters
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         report_path: str = REPORT_PATH,
+
+        # Built-in attack mode for security testing (None | "tamper" | "replay" | "inject")
+        attack: str | None = None,
     ) -> None:
-        
+
         # Validate constructor parameters to ensure they are within expected ranges and types
         if window_size <= 0:
             raise ValueError("window_size must be positive")
@@ -94,6 +98,8 @@ class SRFTUDPServer:
             raise ValueError("timeout_seconds must be positive")
         if chunk_size <= 0:
             raise ValueError("chunk_size must be positive")
+        if attack is not None and attack not in ("tamper", "replay", "inject"):
+            raise ValueError("attack must be one of: tamper, replay, inject")
 
         self.bind_ip = bind_ip
         self.bind_port = bind_port
@@ -101,6 +107,11 @@ class SRFTUDPServer:
         self.timeout_seconds = timeout_seconds
         self.chunk_size = chunk_size
         self.report_path = Path(report_path)
+
+        # Attack mode: None disables attacks; otherwise one of "tamper", "replay", "inject"
+        self.attack = attack
+        self._attack_applied = False   # True once the one-shot attack has fired this transfer
+        self._attack_target_seq = -1   # Sequence number of the packet to attack (set per transfer)
 
         # Raw socket used exclusively for SENDING — allows us to build custom IP+UDP headers
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_UDP)
