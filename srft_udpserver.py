@@ -250,6 +250,14 @@ class SRFTUDPServer:
         self.fin_seq_num = len(self.file_chunks)
         self.transfer_start_time = time.time()
 
+        # For attack mode, pick the 3rd DATA chunk (seq 2) or the last one for very small files
+        if self.attack:
+            self._attack_target_seq = min(2, len(self.file_chunks) - 1)
+            print(
+                f"[ATTACK] Mode '{self.attack}' active — "
+                f"targeting DATA seq={self._attack_target_seq}"
+            )
+
         # Start the sender and receiver threads for this file transfer
         # The receiver thread will run in the background to process ACKs
         receiver_thread = threading.Thread(target=self._ack_receiver_loop, daemon=True)
@@ -566,15 +574,32 @@ class SRFTUDPServer:
         """
         Send a previously constructed packet and update counters/timestamps.
 
+        If an attack mode is active, the first eligible outgoing DATA packet triggers
+        the configured attack (tamper / replay / inject) before or alongside the send.
+
         Args:
             sent_packet: SentPacket object containing the sequence number, payload, and complete packet bytes to be sent
             is_retransmission: Boolean flag indicating whether this packet is being sent as a retransmission
         """
 
-        # Send the packet bytes to the client IP and port using the raw socket
-        self.sock.sendto(sent_packet.packet_bytes, (self.client_ip, self.client_port))
+        packet_bytes = sent_packet.packet_bytes
+        replay_bytes: bytes | None = None  # Non-None only for the "replay" attack
 
-        # Update the sent_at timestamp of the packet for timeout tracking 
+        # One-shot attack: fire once on the designated DATA packet (never on retransmissions)
+        if (
+            self.attack
+            and not self._attack_applied
+            and not is_retransmission
+            and self._attack_target_seq >= 0
+            and sent_packet.seq_num == self._attack_target_seq
+        ):
+            self._attack_applied = True
+            packet_bytes, replay_bytes = self._apply_attack(sent_packet)
+
+        # Send the (possibly tampered) packet
+        self.sock.sendto(packet_bytes, (self.client_ip, self.client_port))
+
+        # Update the sent_at timestamp of the packet for timeout tracking
         sent_packet.sent_at = time.time()
 
         # Increment the count of packets sent
@@ -583,6 +608,96 @@ class SRFTUDPServer:
         # If this packet is being sent as a retransmission, increment the retransmissions count
         if is_retransmission:
             self.retransmissions_count += 1
+
+        # Replay attack: re-send the captured packet after a short pause
+        if replay_bytes is not None:
+            time.sleep(0.1)
+            print(
+                f"[ATTACK] Replaying captured DATA packet seq={sent_packet.seq_num} "
+                "(expect client to reject as duplicate)"
+            )
+            self.sock.sendto(replay_bytes, (self.client_ip, self.client_port))
+
+    # ------------------------------------------------------------------
+    # Built-in attack helpers (security test modes)
+    # ------------------------------------------------------------------
+
+    def _apply_attack(self, sent_packet: SentPacket) -> tuple[bytes, bytes | None]:
+        """
+        Apply the configured one-shot attack to a DATA packet.
+
+        Returns:
+            A tuple of (bytes_to_send, replay_bytes).  replay_bytes is non-None only
+            for the "replay" attack and is the extra copy to re-send after a pause.
+        """
+        original = sent_packet.packet_bytes
+
+        if self.attack == "tamper":
+            # Flip every bit in two bytes of the SRFT payload to corrupt the checksum
+            print(
+                f"[ATTACK] Tampering with DATA packet seq={sent_packet.seq_num} — "
+                "flipping 2 payload bytes (expect checksum failure at receiver)"
+            )
+            return self._tamper_packet(original), None
+
+        elif self.attack == "replay":
+            # Return the original packet plus a copy that will be re-sent as a duplicate
+            print(
+                f"[ATTACK] Capturing DATA packet seq={sent_packet.seq_num} — "
+                "will replay it immediately (expect receiver to reject as duplicate)"
+            )
+            return original, original
+
+        elif self.attack == "inject":
+            # Send the legitimate packet, then also inject a forged one
+            print(
+                f"[ATTACK] Injecting forged packet alongside DATA seq={sent_packet.seq_num} — "
+                "(expect receiver to reject: bad checksum)"
+            )
+            self._inject_forged_packet()
+            return original, None
+
+        return original, None
+
+    def _tamper_packet(self, packet_bytes: bytes) -> bytes:
+        """
+        Return a copy of packet_bytes with 2 bytes in the SRFT payload flipped.
+
+        The SRFT payload begins after the IP header (20 B), UDP header (8 B), and
+        SRFT header (17 B) — i.e. at byte offset 45.  Flipping bits there corrupts
+        both the file data and the SRFT checksum, so is_corrupt() will reject it.
+        """
+        SRFT_PAYLOAD_START = IP_HEADER_SIZE + UDP_HEADER_SIZE + SRFT_HEADER_SIZE  # 45
+        ba = bytearray(packet_bytes)
+        if len(ba) > SRFT_PAYLOAD_START + 1:
+            ba[SRFT_PAYLOAD_START] ^= 0xFF
+            ba[SRFT_PAYLOAD_START + 1] ^= 0xFF
+        elif len(ba) > SRFT_PAYLOAD_START:
+            ba[SRFT_PAYLOAD_START] ^= 0xFF
+        return bytes(ba)
+
+    def _inject_forged_packet(self) -> None:
+        """
+        Build and send a forged DATA packet with random bytes and a wrong SRFT checksum.
+
+        The IP and UDP headers are valid (so the packet reaches the client's DGRAM
+        socket), but the SRFT checksum field is set to 0xDEADBEEF so is_corrupt()
+        will reject it and the client counts it as an authentication failure.
+        """
+        random_payload = os.urandom(50)
+        forged_srft = struct.pack(
+            SRFT_HEADER_FORMAT,
+            FLAG_DATA,          # flags  — looks like a data packet
+            99999,              # seq_num — obviously out of range
+            0,                  # ack_num
+            len(random_payload),
+            0xDEADBEEF,         # deliberately wrong checksum
+        ) + random_payload
+        forged_full = self._build_full_packet(forged_srft)
+        self.sock.sendto(forged_full, (self.client_ip, self.client_port))
+        print("[ATTACK] Forged packet sent (seq=99999, checksum=0xDEADBEEF)")
+
+    # ------------------------------------------------------------------
 
     def _build_full_packet(self, srft_payload: bytes) -> bytes:
         """
@@ -695,6 +810,10 @@ class SRFTUDPServer:
         self.packets_received_count = 0
         self.transfer_start_time = 0.0
         self.transfer_end_time = 0.0
+
+        # Reset attack state so each new transfer gets its own one-shot attack
+        self._attack_applied = False
+        self._attack_target_seq = -1
 
 
 def main() -> None:

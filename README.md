@@ -90,7 +90,7 @@ Run `python3 srft.py --help` at any time to see available commands.
 ### `srft.py server`
 
 ```
-sudo python3 srft.py server [--ip IP] [--port PORT] [--window N] [--timeout SEC]
+sudo python3 srft.py server [--ip IP] [--port PORT] [--window N] [--timeout SEC] [--attack MODE]
 ```
 
 | Flag | Default | Description |
@@ -99,6 +99,7 @@ sudo python3 srft.py server [--ip IP] [--port PORT] [--window N] [--timeout SEC]
 | `--port` | `9000` | UDP port to listen on |
 | `--window` | `5` | Go-Back-N sliding window size |
 | `--timeout` | `0.5` | Retransmission timeout in seconds |
+| `--attack` | *(disabled)* | Built-in attack mode for security testing: `tamper`, `replay`, or `inject` |
 
 ### `srft.py client`
 
@@ -114,6 +115,48 @@ sudo python3 srft.py client FILENAME [--dest-ip IP] [--dest-port PORT] [--src-ip
 | `--src-ip` | auto-detected | Local IP address to send from |
 | `--src-port` | `12345` | Local UDP port to send from |
 | `--timeout` | `2.0` | Receive timeout in seconds |
+
+---
+
+---
+
+## Built-in Attack Modes (`--attack`)
+
+The server supports a `--attack` flag that activates a one-shot built-in attack on a single DATA packet during a transfer. This is used to demonstrate and test the security layer (Phase 2) under adversarial conditions, as required by the course security test plan.
+
+The attack fires exactly once per transfer on the 3rd DATA packet sent (sequence number 2), or on the last packet for very small files. A log line prefixed with `[ATTACK]` is printed to the server console when the attack fires.
+
+### Attack modes
+
+| Mode | What it does | What the receiver should do |
+|---|---|---|
+| `tamper` | Flips every bit in 2 bytes of the SRFT payload, corrupting the checksum | Detect checksum / AEAD failure; drop packet; retransmit resolves it |
+| `replay` | Sends the captured DATA packet a second time (100 ms later) as a duplicate | Detect duplicate sequence number; drop replay; transfer still completes |
+| `inject` | Injects a forged packet with `seq=99999`, random bytes, and `checksum=0xDEADBEEF` | Detect bad checksum / AEAD failure; drop forged packet |
+
+### Usage
+
+Start the server with an attack mode, then run the client normally:
+
+```bash
+# Terminal 1 — server with tamper attack
+sudo python3 srft.py server --ip <your-local-ip> --attack tamper
+
+# Terminal 2 — client (unchanged)
+sudo python3 srft.py client sample.txt --dest-ip <your-local-ip>
+```
+
+Replace `tamper` with `replay` or `inject` to test the other scenarios.
+
+### Security test plan (Phase 2)
+
+| Test | Command | Expected outcome |
+|---|---|---|
+| **Test 1** — Baseline (no attack) | `server` (no `--attack`) | Handshake = Success, AEAD failures = 0, Replay drops = 0, SHA-256 match = Yes |
+| **Test 2** — Wrong PSK | Configure client with a different PSK | Handshake = Fail; no file output produced |
+| **Test 3** — Tamper detection | `server --attack tamper` | Receiver drops tampered packet (AEAD auth failure ↑); transfer completes via retransmission; SHA-256 match = Yes |
+| **Test 4** — Replay protection | `server --attack replay` | Receiver rejects duplicate (Replay drops ↑); SHA-256 match = Yes |
+| **Test 5** — Forged injection | `server --attack inject` | Receiver rejects forged packet (AEAD auth failure ↑); SHA-256 match = Yes |
 
 ---
 
