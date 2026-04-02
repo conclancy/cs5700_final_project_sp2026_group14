@@ -66,10 +66,10 @@ class SRFTUDPClient:
     """
 
     # Send a cumulative ACK after this many consecutive in-order packets
-    ACK_BATCH_SIZE = 4
+    ACK_BATCH_SIZE = 16
 
     # Also send ACK if this many seconds have passed since the last one (delayed ACK)
-    ACK_DELAY = 0.05
+    ACK_DELAY = 0.005
 
     def __init__(
         self,
@@ -254,10 +254,38 @@ class SRFTUDPClient:
         self.sock.sendto(self._build_packet(srft_payload), (self.server_ip, self.server_port))
 
     def _send_ack(self, ack_num: int) -> None:
-        """Send a cumulative ACK packet."""
-        srft_payload = build_srft_packet(FLAG_ACK, 0, ack_num, b"")
+        """Send a cumulative ACK packet with SACK blocks for any buffered out-of-order data."""
+        srft_payload = build_srft_packet(FLAG_ACK, 0, ack_num, self._build_sack_payload())
         self.sock.sendto(self._build_packet(srft_payload), (self.server_ip, self.server_port))
         self.acks_sent += 1
+
+    def _build_sack_payload(self) -> bytes:
+        """
+        Encode out-of-order buffered sequence numbers as SACK blocks.
+
+        Each block is a [start(4B)][end(4B)] pair representing a contiguous range
+        [start, end) of sequence numbers already received out-of-order. The server
+        uses these to skip retransmitting packets it doesn't need to resend.
+        Capped at 8 blocks to keep ACK packets small.
+        """
+        if not self.recv_buf:
+            return b""
+        seqs = sorted(self.recv_buf.keys())
+        ranges: list[tuple[int, int]] = []
+        start = seqs[0]
+        end = seqs[0]
+        for s in seqs[1:]:
+            if s == end + 1:
+                end = s
+            else:
+                ranges.append((start, end + 1))
+                start = s
+                end = s
+        ranges.append((start, end + 1))
+        result = b""
+        for s, e in ranges[:8]:
+            result += struct.pack("!II", s, e)
+        return result
 
     def _recv_packet(self, timeout: float) -> dict | None:
         """
