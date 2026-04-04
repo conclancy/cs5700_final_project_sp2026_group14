@@ -36,6 +36,7 @@ from config import (
     IP_HEADER_SIZE,
     SRFT_PORT,
     UDP_HEADER_SIZE,
+    format_bytes,
 )
 from header import UDPHeader
 from srft_packet import build_srft_packet, ip_checksum, is_corrupt, parse_srft_packet
@@ -109,6 +110,7 @@ class SRFTUDPClient:
         # Counters for transfer report
         self.pkts_received: int = 0
         self.acks_sent: int = 0
+        self.bytes_received: int = 0
         self.start_time: float = 0.0
         self.end_time: float = 0.0
 
@@ -131,6 +133,9 @@ class SRFTUDPClient:
         got_data = False
         last_ack_time = self.start_time
         since_last_ack = 0
+        _PROGRESS_INTERVAL = 0.5  # seconds between progress bar updates
+        last_progress_time = self.start_time
+        last_progress_bytes = 0
 
         while True:
             pkt = self._recv_packet(self.timeout)
@@ -163,12 +168,15 @@ class SRFTUDPClient:
                 if seq == self.next_expected:
                     # In-order: deliver immediately
                     self.chunks[seq] = payload
+                    self.bytes_received += len(payload)
                     self.next_expected += 1
                     since_last_ack += 1
 
                     # Deliver any contiguous buffered out-of-order packets
                     while self.next_expected in self.recv_buf:
-                        self.chunks[self.next_expected] = self.recv_buf.pop(self.next_expected)
+                        chunk = self.recv_buf.pop(self.next_expected)
+                        self.chunks[self.next_expected] = chunk
+                        self.bytes_received += len(chunk)
                         self.next_expected += 1
                         since_last_ack += 1
 
@@ -178,6 +186,12 @@ class SRFTUDPClient:
                         self._send_ack(self.next_expected)
                         last_ack_time = now
                         since_last_ack = 0
+
+                    # Update progress bar
+                    if now - last_progress_time >= _PROGRESS_INTERVAL:
+                        last_progress_time, last_progress_bytes = self._print_progress(
+                            last_progress_time, last_progress_bytes
+                        )
 
                 elif seq > self.next_expected:
                     # Out-of-order: buffer and send a duplicate ACK
@@ -192,11 +206,16 @@ class SRFTUDPClient:
                     self._send_ack(self.next_expected)
 
             elif flags & FLAG_FIN:
+
                 # Flush any pending data ACK first, then ACK the FIN
                 if since_last_ack > 0:
                     self._send_ack(self.next_expected)
                 self.fin_seq = seq
                 self._send_ack(seq + 1)
+
+                # Final progress update then move to a new line before printing completion message
+                self._print_progress(last_progress_time, last_progress_bytes)
+                print()
                 print(f"FIN received (seq={seq}), transfer complete.")
                 break
 
@@ -286,6 +305,41 @@ class SRFTUDPClient:
         for s, e in ranges[:8]:
             result += struct.pack("!II", s, e)
         return result
+
+    def _print_progress(self, last_time: float, last_bytes: int) -> tuple[float, int]:
+        """
+        Render a progress bar to terminal for the current receive.
+
+        The client does not know the total file size, so throughput and elapsed
+        time are shown instead of a percentage/ETA.
+
+        Args:
+            last_time:  Timestamp of the previous progress print.
+            last_bytes: bytes_received value at the previous progress print.
+        Returns:
+            (now, current_bytes) to pass back as last_time/last_bytes on the next call.
+        """
+        now = time.time()
+        current_bytes = self.bytes_received
+        elapsed = now - self.start_time
+
+        delta_t = now - last_time
+        delta_bytes = current_bytes - last_bytes
+        if delta_t > 0 and delta_bytes > 0:
+            speed = delta_bytes / delta_t
+        elif elapsed > 0:
+            speed = current_bytes / elapsed
+        else:
+            speed = 0.0
+
+        elapsed_str = str(timedelta(seconds=int(elapsed)))
+        print(
+            f"\rReceived {format_bytes(current_bytes)} | "
+            f"{format_bytes(speed)}/s | Elapsed {elapsed_str}   ",
+            end="",
+            flush=True,
+        )
+        return now, current_bytes
 
     def _recv_packet(self, timeout: float) -> dict | None:
         """

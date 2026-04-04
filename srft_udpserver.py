@@ -30,6 +30,7 @@ from config import (
     IP_HEADER_SIZE,
     SRFT_HEADER_SIZE,
     REPORT_PATH,
+    format_bytes,
 )
 from header import UDPHeader
 from srft_packet import build_srft_packet, ip_checksum, is_corrupt, parse_srft_packet
@@ -394,15 +395,70 @@ class SRFTUDPServer:
 
         self.report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
+    def _print_progress(self, last_time: float, last_base: int) -> tuple[float, int]:
+        """
+        Render a progress bar in terminal for the current transfer.
+
+        Args:
+            last_time: Timestamp of the previous progress print (used to compute throughput).
+            last_base: send_base value at the previous progress print.
+        Returns:
+            (now, current_base) to pass back as last_time/last_base on the next call.
+        """
+        now = time.time()
+        current_base = self.send_base
+        total_chunks = len(self.file_chunks)
+
+        if total_chunks == 0:
+            return now, current_base
+
+        pct = min(current_base / total_chunks, 1.0)
+        acked_bytes = min(current_base * self.chunk_size, self.file_size)
+        elapsed = now - self.transfer_start_time
+
+        # Throughput over the last interval
+        delta_t = now - last_time
+        delta_chunks = current_base - last_base
+        if delta_t > 0 and delta_chunks > 0:
+            speed = (delta_chunks * self.chunk_size) / delta_t
+        elif elapsed > 0:
+            speed = acked_bytes / elapsed
+        else:
+            speed = 0.0
+
+        # ETA
+        remaining = self.file_size - acked_bytes
+        if speed > 0:
+            eta_str = str(timedelta(seconds=int(remaining / speed)))
+        else:
+            eta_str = "--:--"
+
+        # Build the bar
+        bar_width = 28
+        filled = int(bar_width * pct)
+        bar = "█" * filled + "░" * (bar_width - filled)
+
+        print(
+            f"\r[{bar}] {pct * 100:5.1f}% | "
+            f"{format_bytes(acked_bytes)}/{format_bytes(self.file_size)} | "
+            f"{format_bytes(speed)}/s | ETA {eta_str}   ",
+            end="",
+            flush=True,
+        )
+        return now, current_base
+
     def _sender_loop(self) -> None:
         """
         Main sender loop for file data and FIN handling.
         """
 
         # This loop runs in the sender thread and is responsible for sending new data packets while the window allows,
-        # handling timeouts and retransmissions, and sending the FIN packet when all data has been sent. It also checks 
+        # handling timeouts and retransmissions, and sending the FIN packet when all data has been sent. It also checks
         # for the completion of the transfer when the FIN is acknowledged.
         fin_sent = False
+        _PROGRESS_INTERVAL = 0.5  # seconds between progress bar updates
+        last_progress_time = time.time()
+        last_progress_base = 0
 
         while not self.transfer_complete.is_set():
             self.send_window()
@@ -423,7 +479,7 @@ class SRFTUDPServer:
                 self.transfer_complete.set()
                 break
 
-            # Check for timeouts on the oldest unacknowledged packet in the window and retransmit if necessary. 
+            # Check for timeouts on the oldest unacknowledged packet in the window and retransmit if necessary.
             # Also check for FIN timeout if the FIN has been sent but not acknowledged.
             with self.transfer_lock:
                 oldest_packet = self.unacked_packets.get(self.send_base)
@@ -439,8 +495,19 @@ class SRFTUDPServer:
                 if elapsed >= self.timeout_seconds:
                     self._send_stored_packet(self.fin_packet, is_retransmission=True)
 
+            # Print progress bar every 0.5 seconds
+            now = time.time()
+            if now - last_progress_time >= _PROGRESS_INTERVAL:
+                last_progress_time, last_progress_base = self._print_progress(
+                    last_progress_time, last_progress_base
+                )
+
             # Restart loop every 1ms to check for new ACKs and timeouts
             time.sleep(0.001)
+
+        # Final progress update then move to a new line
+        self._print_progress(last_progress_time, last_progress_base)
+        print()
 
     def _ack_receiver_loop(self) -> None:
         """
