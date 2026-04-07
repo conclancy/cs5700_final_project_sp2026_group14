@@ -353,6 +353,7 @@ class SRFTUDPServer:
         duration_text = str(timedelta(seconds=duration_seconds))
 
         # Generate report lines about the transfer and write them to the specified report file path
+        # TODO: fill the variables for the last five lines
         lines = [
             f"Name of the transferred file: {self.requested_file}",
             f"Size of the transferred file: {self.file_size}",
@@ -360,6 +361,11 @@ class SRFTUDPServer:
             f"The number of retransmitted packets from the server: {self.retransmissions_count}",
             f"The number of packets received from the client: {self.packets_received_count}",
             f"The time duration of the file transfer (hh:min:ss): {duration_text}",
+            f"Security enabled (PSK + AEAD): ",
+            f"Handshake status: ",
+            f"AEAD authentication failures (invalid packets dropped): ",
+            f"Replay drops (duplicate/out-of-window packets): ",
+            f"SHA-256 match: "
         ]
 
         self.report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
