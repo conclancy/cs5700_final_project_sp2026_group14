@@ -48,6 +48,7 @@ def build_srft_packet(flags: int, seq_num: int, ack_num: int, payload: bytes) ->
         SRFT_HEADER_FORMAT, flags, seq_num, ack_num, len(payload), 0
     )
     checksum = compute_payload_checksum(header_without_checksum[:-4] + payload)
+
     return (
         struct.pack(SRFT_HEADER_FORMAT, flags, seq_num, ack_num, len(payload), checksum)
         + payload
