@@ -38,6 +38,18 @@ FLAG_FIN  = 0x04    # Packet signals end-of-file (no more data)
 FLAG_SYN  = 0x08    # Packet initiates a connection
 FLAG_ERR  = 0x10    # Packet signals an error condition
 
+# ---------------------------------------------------------------------------
+# Security
+# ---------------------------------------------------------------------------
+
+# Pre-shared key used by both client and server
+# Must be >= 32 bytes for strong security
+PSK = b"H34TzTGjeesW7zcP83KXTMm43d8Y4Vok"
+
+# Handshake field sizes
+CLIENT_NONCE_SIZE = 16
+SERVER_NONCE_SIZE = 16
+SESSION_ID_SIZE   = 8
 
 # ---------------------------------------------------------------------------
 # Utility
