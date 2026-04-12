@@ -88,16 +88,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument(
         "--window",
         type=int,
-        default=5,
+        default=64,
         metavar="N",
-        help="Go-Back-N window size (default: 5)",
+        help="Go-Back-N window size (default: 64)",
     )
     sp.add_argument(
         "--timeout",
         type=float,
-        default=0.5,
+        default=0.05,
         metavar="SEC",
-        help="retransmission timeout in seconds (default: 0.5)",
+        help="retransmission timeout in seconds (default: 0.05)",
     )
     sp.set_defaults(func=cmd_server)
 

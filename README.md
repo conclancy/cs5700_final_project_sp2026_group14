@@ -200,7 +200,7 @@ ssh -i srft-server-keypair.pem ubuntu@3.147.82.30
 
 #### Running the Server
 ```bash
-sudo SRFT_SERVER_IP=172.31.1.158 SRFT_SERVER_PORT=9000 python3 srft_udpserver.py
+sudo python3 srft.py server --ip 172.31.1.158
 ```
 
 ### SRFT Client
@@ -231,3 +231,7 @@ sudo python3 srft.py client sample.txt --dest-ip 172.31.1.158
     - Server: `scp -r -i srft-server-keypair.pem . ubuntu@3.147.82.30:~/cs5700_final_project_sp2026_group14`
     - Client: `scp -r -i cs5700_final_project_sp2026_group14/srft-client-keypair.pem cs5700_final_project_sp2026_group14 ubuntu@3.141.2.243:~`
 4. If successful, the code will now be in the home directory of the EC2 instance.
+5. On **each** EC2 instance, install the required Python dependency:
+```bash
+sudo apt install python3-cryptography
+```
