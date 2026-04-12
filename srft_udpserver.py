@@ -30,6 +30,7 @@ from config import (
     IP_HEADER_SIZE,
     SRFT_HEADER_SIZE,
     REPORT_PATH,
+    format_bytes,
 )
 from header import UDPHeader
 from srft_packet import build_srft_packet, ip_checksum, is_corrupt, parse_srft_packet
@@ -79,8 +80,8 @@ class SRFTUDPServer:
         self,
         bind_ip: str,
         bind_port: int,
-        window_size: int = 5,
-        timeout_seconds: float = 0.5,
+        window_size: int = 64,
+        timeout_seconds: float = 0.05,
 
         # Allow chun_size and report_path to be overridden by constructor parameters
         chunk_size: int = DEFAULT_CHUNK_SIZE,
@@ -304,24 +305,29 @@ class SRFTUDPServer:
 
                 self._send_stored_packet(sent_packet, is_retransmission=True)
 
-    def process_ack(self, ack_num: int) -> None:
+    def process_ack(self, ack_num: int, sack_payload: bytes = b"") -> None:
         """
         Process a cumulative acknowledgement number from the client.
 
         Args:
-            ack_num: The cumulative ACK number received from the client, indicating that all packets 
-            with sequence numbers less than ack_num have been received successfully. This method will 
+            ack_num: The cumulative ACK number received from the client, indicating that all packets
+            with sequence numbers less than ack_num have been received successfully. This method will
             mark packets as acknowledged and slide the window accordingly.
+            sack_payload: Optional SACK block bytes from the ACK payload encoding out-of-order
+            received ranges as [start(4B)][end(4B)] pairs. Used to skip already-received packets
+            during Go-Back-N retransmission.
         """
 
         # Called by the ACK receiver thread when an ACK packet is received from the client
         with self.transfer_lock:
 
-            # If the ACK number is less than or equal to the current send_base it is a duplicate
+            # If the ACK number is less than or equal to the current send_base it is a duplicate,
+            # but still apply any SACK info to avoid redundant retransmissions
             if ack_num <= self.send_base:
+                self._apply_sack(sack_payload)
                 return
 
-            # Mark all packets with sequence numbers less than the ACK number as acknowledged and remove 
+            # Mark all packets with sequence numbers less than the ACK number as acknowledged and remove
             # them from the unacked_packets dictionary
             upper_bound = min(ack_num, self.fin_seq_num + 1)
             for seq_num in list(self.unacked_packets):
@@ -334,6 +340,9 @@ class SRFTUDPServer:
             if ack_num > self.send_base:
                 self.send_base = ack_num
 
+            # Apply SACK blocks to mark any out-of-order packets already received by the client
+            self._apply_sack(sack_payload)
+
             # If the ACK number acknowledges the FIN packet, mark the FIN as acknowledged and check if the transfer is complete
             if ack_num > self.fin_seq_num:
                 self.fin_acked = True
@@ -342,6 +351,28 @@ class SRFTUDPServer:
             # If the send_base has advanced past the last data packet and the FIN has been acknowledged, the transfer is complete
             if self.send_base >= self.fin_seq_num and self.fin_acked:
                 self.transfer_complete.set()
+
+    def _apply_sack(self, sack_payload: bytes) -> None:
+        """
+        Mark out-of-order packets already received by the client as acknowledged.
+
+        Called with self.transfer_lock held. Parses SACK blocks encoded as
+        [start_seq(4B)][end_seq(4B)] pairs and removes the corresponding packets
+        from unacked_packets so retransmit_from_base skips them.
+
+        Args:
+            sack_payload: Raw SACK bytes from the ACK packet payload.
+        """
+        if not sack_payload or len(sack_payload) % 8 != 0:
+            return
+        n_blocks = len(sack_payload) // 8
+        for i in range(n_blocks):
+            start, end = struct.unpack("!II", sack_payload[i * 8 : (i + 1) * 8])
+            for seq in range(start, end):
+                pkt = self.unacked_packets.get(seq)
+                if pkt is not None:
+                    pkt.acked = True
+                    del self.unacked_packets[seq]
 
     def write_report(self) -> None:
         """
@@ -364,15 +395,70 @@ class SRFTUDPServer:
 
         self.report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
+    def _print_progress(self, last_time: float, last_base: int) -> tuple[float, int]:
+        """
+        Render a progress bar in terminal for the current transfer.
+
+        Args:
+            last_time: Timestamp of the previous progress print (used to compute throughput).
+            last_base: send_base value at the previous progress print.
+        Returns:
+            (now, current_base) to pass back as last_time/last_base on the next call.
+        """
+        now = time.time()
+        current_base = self.send_base
+        total_chunks = len(self.file_chunks)
+
+        if total_chunks == 0:
+            return now, current_base
+
+        pct = min(current_base / total_chunks, 1.0)
+        acked_bytes = min(current_base * self.chunk_size, self.file_size)
+        elapsed = now - self.transfer_start_time
+
+        # Throughput over the last interval
+        delta_t = now - last_time
+        delta_chunks = current_base - last_base
+        if delta_t > 0 and delta_chunks > 0:
+            speed = (delta_chunks * self.chunk_size) / delta_t
+        elif elapsed > 0:
+            speed = acked_bytes / elapsed
+        else:
+            speed = 0.0
+
+        # ETA
+        remaining = self.file_size - acked_bytes
+        if speed > 0:
+            eta_str = str(timedelta(seconds=int(remaining / speed)))
+        else:
+            eta_str = "--:--"
+
+        # Build the bar
+        bar_width = 28
+        filled = int(bar_width * pct)
+        bar = "█" * filled + "░" * (bar_width - filled)
+
+        print(
+            f"\r[{bar}] {pct * 100:5.1f}% | "
+            f"{format_bytes(acked_bytes)}/{format_bytes(self.file_size)} | "
+            f"{format_bytes(speed)}/s | ETA {eta_str}   ",
+            end="",
+            flush=True,
+        )
+        return now, current_base
+
     def _sender_loop(self) -> None:
         """
         Main sender loop for file data and FIN handling.
         """
 
         # This loop runs in the sender thread and is responsible for sending new data packets while the window allows,
-        # handling timeouts and retransmissions, and sending the FIN packet when all data has been sent. It also checks 
+        # handling timeouts and retransmissions, and sending the FIN packet when all data has been sent. It also checks
         # for the completion of the transfer when the FIN is acknowledged.
         fin_sent = False
+        _PROGRESS_INTERVAL = 0.5  # seconds between progress bar updates
+        last_progress_time = time.time()
+        last_progress_base = 0
 
         while not self.transfer_complete.is_set():
             self.send_window()
@@ -393,7 +479,7 @@ class SRFTUDPServer:
                 self.transfer_complete.set()
                 break
 
-            # Check for timeouts on the oldest unacknowledged packet in the window and retransmit if necessary. 
+            # Check for timeouts on the oldest unacknowledged packet in the window and retransmit if necessary.
             # Also check for FIN timeout if the FIN has been sent but not acknowledged.
             with self.transfer_lock:
                 oldest_packet = self.unacked_packets.get(self.send_base)
@@ -409,8 +495,19 @@ class SRFTUDPServer:
                 if elapsed >= self.timeout_seconds:
                     self._send_stored_packet(self.fin_packet, is_retransmission=True)
 
-            # Restart loop every 10ms to check for new ACKs and timeouts
-            time.sleep(0.01)
+            # Print progress bar every 0.5 seconds
+            now = time.time()
+            if now - last_progress_time >= _PROGRESS_INTERVAL:
+                last_progress_time, last_progress_base = self._print_progress(
+                    last_progress_time, last_progress_base
+                )
+
+            # Restart loop every 1ms to check for new ACKs and timeouts
+            time.sleep(0.001)
+
+        # Final progress update then move to a new line
+        self._print_progress(last_progress_time, last_progress_base)
+        print()
 
     def _ack_receiver_loop(self) -> None:
         """
@@ -435,9 +532,13 @@ class SRFTUDPServer:
             srft_packet = packet_info["srft_packet"]
             flags = int(srft_packet["flags"])
 
-            # If the packet has the ACK flag, process it and update the sender state
+            # If the packet has the ACK flag, process it and update the sender state.
+            # Also extract any SACK payload for selective retransmission.
             if flags & FLAG_ACK:
-                self.process_ack(int(srft_packet["ack_num"]))
+                sack_payload = srft_packet.get("payload", b"")
+                if not isinstance(sack_payload, bytes):
+                    sack_payload = b""
+                self.process_ack(int(srft_packet["ack_num"]), sack_payload)
 
     def _receive_srft_packet(self, timeout: float | None) -> dict[str, object] | None:
         """
@@ -690,8 +791,8 @@ def main() -> None:
     # Read configuration parameters from environment variables with defaults for local testing
     bind_ip = os.environ.get("SRFT_SERVER_IP", "127.0.0.1")
     bind_port = int(os.environ.get("SRFT_SERVER_PORT", "9000"))
-    window_size = int(os.environ.get("SRFT_WINDOW_SIZE", "5"))
-    timeout_seconds = float(os.environ.get("SRFT_TIMEOUT_SECONDS", "0.5"))
+    window_size = int(os.environ.get("SRFT_WINDOW_SIZE", "64"))
+    timeout_seconds = float(os.environ.get("SRFT_TIMEOUT_SECONDS", "0.05"))
 
     # Create and start the SRFT UDP server with the specified configuration parameters
     server = SRFTUDPServer(

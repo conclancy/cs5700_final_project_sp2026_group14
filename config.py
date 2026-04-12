@@ -37,3 +37,16 @@ FLAG_ACK  = 0x02    # Packet is a cumulative acknowledgement
 FLAG_FIN  = 0x04    # Packet signals end-of-file (no more data)
 FLAG_SYN  = 0x08    # Packet initiates a connection
 FLAG_ERR  = 0x10    # Packet signals an error condition
+
+
+# ---------------------------------------------------------------------------
+# Utility
+# ---------------------------------------------------------------------------
+
+def format_bytes(n: float) -> str:
+    """Return a human-readable byte count string (e.g. '12.3 MB')."""
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
