@@ -5,12 +5,19 @@ Single entry point for starting the SRFT server or client.
 
 Usage:
     sudo python3 srft.py server [--ip IP] [--port PORT] [--window N] [--timeout SEC]
+                                [--attack {tamper,replay,inject}]
     sudo python3 srft.py client FILENAME [--dest-ip IP] [--dest-port PORT]
                                          [--src-ip IP] [--src-port PORT] [--timeout SEC]
 
 Examples:
     sudo python3 srft.py server --ip 192.168.1.10
+    sudo python3 srft.py server --ip 192.168.1.10 --attack tamper
     sudo python3 srft.py client sample.txt --dest-ip 192.168.1.10
+
+Attack modes (security test plan):
+    tamper  — flip 2 bytes in one DATA packet payload; tests checksum / AEAD detection
+    replay  — re-send one captured DATA packet as a duplicate; tests replay protection
+    inject  — inject a forged packet with random bytes; tests authentication failure handling
 """
 
 from __future__ import annotations
@@ -42,6 +49,7 @@ def cmd_server(args: argparse.Namespace) -> None:
         bind_port=args.port,
         window_size=args.window,
         timeout_seconds=args.timeout,
+        attack=args.attack,
     )
     server.serve_forever()
 
@@ -98,6 +106,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.05,
         metavar="SEC",
         help="retransmission timeout in seconds (default: 0.05)",
+    )
+    sp.add_argument(
+        "--attack",
+        choices=["tamper", "replay", "inject"],
+        default=None,
+        metavar="MODE",
+        help=(
+            "built-in attack mode for security testing: "
+            "tamper (flip 2 payload bytes), "
+            "replay (resend one captured packet), "
+            "inject (send a forged packet)"
+        ),
     )
     sp.set_defaults(func=cmd_server)
 
