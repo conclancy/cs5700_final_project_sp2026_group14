@@ -91,11 +91,19 @@ class SRFTUDPClient:
         self.ip_pkt_id: int              = 0
 
         # Counters
-        self.pkts_received: int  = 0
-        self.acks_sent:     int  = 0
-        self.bytes_received: int = 0
-        self.start_time: float   = 0.0
-        self.end_time:   float   = 0.0
+        self.pkts_received: int    = 0
+        self.acks_sent:     int    = 0
+        self.bytes_received: int   = 0
+        self.duplicate_pkts: int   = 0
+        self.checksum_errors: int  = 0
+        self.aead_failures: int    = 0
+        self.start_time: float     = 0.0
+        self.end_time:   float     = 0.0
+
+        # Transfer outcome
+        self.handshake_complete: bool = False
+        self.sha256_match: bool       = False
+        self.received_md5: str        = ""
 
     # ------------------------------------------------------------------
     # Public API
@@ -121,6 +129,7 @@ class SRFTUDPClient:
         )
         self.session_key = enc_key
         self.session_id  = session_id
+        self.handshake_complete = True
 
         # ── Step 3: request the file ─────────────────────────────────
         self._send_syn(filename)
@@ -186,11 +195,15 @@ class SRFTUDPClient:
                 elif seq > self.next_expected:
                     if seq not in self.recv_buf and seq not in self.chunks:
                         self.recv_buf[seq] = payload
+                    else:
+                        self.duplicate_pkts += 1
                     self._send_ack(self.next_expected)
                     last_ack_time  = time.time()
                     since_last_ack = 0
 
                 else:
+                    # seq < next_expected: already delivered
+                    self.duplicate_pkts += 1
                     self._send_ack(self.next_expected)
 
             elif flags & FLAG_FIN:
@@ -237,6 +250,7 @@ class SRFTUDPClient:
             AESGCM(self.session_key),
             b"\x00" * 12,
         )
+        self.sha256_match = verified
         if not verified:
             print("WARNING: File integrity check FAILED — received file may be corrupt!")
         else:
@@ -246,6 +260,7 @@ class SRFTUDPClient:
         out_path.write_bytes(file_data)
 
         md5 = hashlib.md5(file_data).hexdigest()
+        self.received_md5 = md5
         print(f"File written : {out_path}  ({len(file_data)} bytes)")
         print(f"MD5          : {md5}")
 
@@ -253,10 +268,16 @@ class SRFTUDPClient:
         """Write the client-side transfer report."""
         duration = str(timedelta(seconds=max(0, int(self.end_time - self.start_time))))
         lines = [
-            f"Name of the transferred file: {filename}",
-            f"The number of packets received from the server: {self.pkts_received}",
-            f"The number of ACKs sent to the server: {self.acks_sent}",
-            f"The time duration of the file transfer (hh:min:ss): {duration}",
+            f"Security enabled (PSK + AEAD): True",
+            f"Handshake status: {'Success' if self.handshake_complete else 'Failed'}",
+            f"Size of the transferred file: {self.bytes_received}",
+            f"Number of packets received from server: {self.pkts_received}",
+            f"Number of duplicate packets: {self.duplicate_pkts}",
+            f"Number of packets with checksum errors: {self.checksum_errors}",
+            f"Time duration of the file transfer (hh:mm:ss): {duration}",
+            f"Received file MD5: {self.received_md5}",
+            f"AEAD authentication failures: {self.aead_failures}",
+            f"SHA-256 Match: {self.sha256_match}",
         ]
         session_suffix = self.session_id.hex() if hasattr(self, "session_id") else "unknown"
         report_path = (self.output_dir / f"client_transfer_report_{session_suffix}.txt")
@@ -340,6 +361,7 @@ class SRFTUDPClient:
             return None
 
         if is_corrupt(srft):
+            self.checksum_errors += 1
             return None
 
         # Only DATA packets are encrypted — never SYN, FIN, ACK, or ERR
@@ -354,6 +376,7 @@ class SRFTUDPClient:
                     srft["ack_num"],
                 )
             except InvalidTag:
+                self.aead_failures += 1
                 return None
 
         return {"src_ip": src_ip, "src_port": src_port, "srft": srft}
