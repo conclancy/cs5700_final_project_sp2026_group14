@@ -231,6 +231,7 @@ class SRFTUDPServer:
             file_bytes = fh.read()
 
         self.file_size = len(file_bytes)
+        self.original_md5 = hashlib.md5(file_bytes).hexdigest()
         self.file_chunks = self._segment_file(file_bytes)
         self.fin_seq_num = len(self.file_chunks)
         self.transfer_start_time = time.time()
@@ -353,6 +354,7 @@ class SRFTUDPServer:
             f"The number of retransmitted packets from the server: {self.retransmissions_count}",
             f"The number of packets received from the client: {self.packets_received_count}",
             f"The time duration of the file transfer (hh:min:ss): {duration_text}",
+            f"Original file MD5: {getattr(self, 'original_md5', 'unknown')}",
         ]
         session_suffix = self.session_id.hex() if hasattr(self, "session_id") else "unknown"
         report_path = self.report_path.with_stem(f"{self.report_path.stem}_{session_suffix}")
