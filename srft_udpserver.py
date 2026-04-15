@@ -150,6 +150,7 @@ class SRFTUDPServer:
         self.packets_received_count = 0
         self.transfer_start_time = 0.0
         self.transfer_end_time = 0.0
+        self.original_md5 = ""
 
     def serve_forever(self) -> None:
         """Run the server loop and process one request at a time."""
@@ -714,6 +715,7 @@ class SRFTUDPServer:
         self.packets_received_count = 0
         self.transfer_start_time = 0.0
         self.transfer_end_time = 0.0
+        self.original_md5 = ""
 
         # Reset attack state so each new transfer gets its own one-shot attack
         self._attack_applied = False
